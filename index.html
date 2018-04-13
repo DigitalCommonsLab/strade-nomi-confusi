@@ -21,8 +21,31 @@
 
 <script src="https://unpkg.com/jquery@3.3.1/dist/jquery.js"></script>
 <script src="https://unpkg.com/underscore@1.8.3/underscore.js"></script>
+<!-- <script src="https://unpkg.com/underscore.string@3.3.4/index.js"></script> -->
 <script src="https://unpkg.com/leaflet@1.3.1/dist/leaflet-src.js"></script>
 <script>
+
+
+String.prototype.levenstein = function(string) {
+    var a = this, b = string + "", m = [], i, j, min = Math.min;
+
+    if (!(a && b)) return (b || a).length;
+
+    for (i = 0; i <= b.length; m[i] = [i++]);
+    for (j = 0; j <= a.length; m[0][j] = j++);
+
+    for (i = 1; i <= b.length; i++) {
+        for (j = 1; j <= a.length; j++) {
+            m[i][j] = b.charAt(i - 1) == a.charAt(j - 1)
+                ? m[i - 1][j - 1]
+                : m[i][j] = min(
+                    m[i - 1][j - 1] + 1, 
+                    min(m[i][j - 1] + 1, m[i - 1 ][j]))
+        }
+    }
+
+    return m[b.length][a.length];
+}
 
 function randomColor() {
   var letters = '0123456789ABCDEF';
@@ -59,8 +82,7 @@ var map = new L.Map('map', {
 					
 					layer.bindTooltip(f.properties.name);
 
-					var html = '<h2>'+f.properties.name+'</h2>';
-					layer.bindPopup(html);
+					//layer.bindPopup('<h2>'+f.properties.name+'</h2>');
 					layer.on('mouseover', function(e) {
 						
 						e.target.bringToFront();
@@ -75,7 +97,37 @@ var map = new L.Map('map', {
 						e.target.setStyle({
 							weight:4,
 							opacity:0.8
-						})
+						});
+					}).on('click', function(e) {
+						var name = e.target.feature.properties.name;
+
+						var ranks = [];
+
+						geo.eachLayer(function(l) {
+							
+							ranks.push({
+								lev: name.levenstein( l.feature.properties.name ),
+								layer: l,
+							});
+
+							l.setStyle({
+								opacity: 0.2
+							});
+						});
+
+						ranks = _.sortBy(ranks, 'lev');//.reverse();
+						ranks = _.first(ranks, 10);
+
+						for(let r in ranks){
+							
+							//console.log(ranks[r].lev, ranks[r].layer.feature.properties.name);
+
+							ranks[r].layer.setStyle({
+								opacity: 1,
+								weight: 10
+							}).openTooltip();
+						}
+
 					});
 				}
 			});
