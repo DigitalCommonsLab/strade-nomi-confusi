@@ -99,6 +99,9 @@ var map = new L.Map('map', {
 							opacity:0.8
 						});
 					}).on('click', function(e) {
+
+						L.DomEvent.stopPropagation(e)
+
 						var name = e.target.feature.properties.name;
 
 						var ranks = [];
@@ -133,6 +136,15 @@ var map = new L.Map('map', {
 			});
 		//TODO fitBounds(json.bbox)
 		geo.addTo(map);
+
+		map.on('click', function(e) {
+			geo.eachLayer(function(l) {
+				l.setStyle({
+					weight:4,
+					opacity:0.8,
+				});
+			});
+		});
 
 	});
 </script>
