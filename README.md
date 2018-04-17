@@ -14,3 +14,12 @@ select distinct lower(name)
 from highway 
 where highway.highway <> '' 
 order by name
+
+
+
+# Usage
+
+```
+npm install
+npm start
+```
