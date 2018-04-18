@@ -3,6 +3,7 @@ var $ = require('jquery'),
 	_ = require('underscore'),
 	s = require('underscore.string'),
 	latinize = require('latinize'),
+	csv = require('jquery-csv'),
 	L = require('leaflet');
 
 _.mixin({str: s});
@@ -27,6 +28,36 @@ String.prototype.levenstein = function(string) {
 	return m[b.length][a.length];
 }
 
+function getUncommon(text, common) {
+    var words = _.str.words(text),
+        commonObj = {},
+        uncommonArr = [],
+        word, i;
+
+    for ( i = 0; i < common.length; i++ ) {
+        commonObj[ common[i].trim() ] = true;
+    }
+    
+    for ( i = 0; i < words.length; i++ ) {
+        
+        word = words[i].trim().toLowerCase();
+
+        if ( !commonObj[word] ) {
+            uncommonArr.push(word);
+        }
+    }
+    
+    return uncommonArr.join(' ');
+}
+
+function cleanName(text) {
+	var ret = ""+_.str(text).trim().toLowerCase();
+	
+	ret.diff(blacklist);
+
+	return ret;
+};
+
 function randomColor() {
 	var letters = '0123456789ABCDEF';
 	var color = '#';
@@ -45,10 +76,44 @@ var map = new L.Map('map', {
 	})
 });
 
+var blacklist = [];
+
+$.ajax({
+	async: false,
+	url: 'data/highway_blacklist_name.csv',
+	success: function(text) {
+		blacklist = _.flatten(csv.toArrays(text));
+	}
+});
 
 $.getJSON('data/highway.json', function(json) {
 
 	//TODO normalize properties name:it short_name to only name
+	
+console.log('BEFORE',json);
+
+	var fgroups = _.groupBy(json.features, function(f) {
+		return f.properties.name;
+	});
+
+	json.features = _.map(fgroups, function(ff) {
+		//console.log(ff)
+
+		var f1 = ff[0];
+
+		for(var f in ff) {
+			
+			if(f1.geometry.coordinates[0]==ff[f].geometry.coordinates[0])
+				ff[f].geometry.coordinates = ff[f].geometry.coordinates.reverse();
+
+			f1.geometry.coordinates = _.union(f1.geometry.coordinates, ff[f].geometry.coordinates);
+		}
+
+		return f1;
+	});
+
+console.log('AFTER',json);
+
 
 	var geo = L.geoJSON(json, {
 			style: function(f) {
@@ -59,8 +124,10 @@ $.getJSON('data/highway.json', function(json) {
 				};
 			},
 			onEachFeature: function (f, layer) {
+
+				f.properties.cleanName = getUncommon(f.properties.name, blacklist);
 				
-				layer.bindTooltip(f.properties.name);
+				layer.bindTooltip(f.properties.name);//+'<br /><i>'+f.properties.cleanName+'</i>');
 
 				//layer.bindPopup('<h2>'+f.properties.name+'</h2>');
 				layer.on('mouseover', function(e) {
@@ -82,16 +149,19 @@ $.getJSON('data/highway.json', function(json) {
 
 					L.DomEvent.stopPropagation(e)
 
-					var name = e.target.feature.properties.name;
-
 					var ranks = [];
 
 					geo.eachLayer(function(l) {
 						
-						ranks.push({
-							lev: name.levenstein( l.feature.properties.name ),
-							layer: l,
-						});
+						var lev = e.target.feature.properties.cleanName.levenstein( l.feature.properties.cleanName );
+
+						if( lev < 4) {
+							ranks.push({
+								lev: lev,
+								name: l.feature.properties.name,
+								layer: l,
+							});
+						}
 
 						l.setStyle({
 							opacity: 0.2
@@ -101,14 +171,12 @@ $.getJSON('data/highway.json', function(json) {
 					ranks = _.sortBy(ranks, 'lev');//.reverse();
 					ranks = _.first(ranks, 10);
 
-					for(let r in ranks){
+					for(let r in ranks) {
 						
-						//console.log(ranks[r].lev, ranks[r].layer.feature.properties.name);
-
 						ranks[r].layer.setStyle({
 							opacity: 1,
 							weight: 10
-						}).openTooltip();
+						}).bindTooltip(ranks[r].name+'<br />diff: <b>'+ranks[r].lev+'</b>').openTooltip();
 					}
 
 				});

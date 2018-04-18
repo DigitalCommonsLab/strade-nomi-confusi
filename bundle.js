@@ -19,6 +19,7 @@ var $ = require('jquery'),
 	_ = require('underscore'),
 	s = require('underscore.string'),
 	latinize = require('latinize'),
+	csv = require('jquery-csv'),
 	L = require('leaflet');
 
 _.mixin({str: s});
@@ -43,6 +44,36 @@ String.prototype.levenstein = function(string) {
 	return m[b.length][a.length];
 }
 
+function getUncommon(text, common) {
+    var words = _.str.words(text),
+        commonObj = {},
+        uncommonArr = [],
+        word, i;
+
+    for ( i = 0; i < common.length; i++ ) {
+        commonObj[ common[i].trim() ] = true;
+    }
+    
+    for ( i = 0; i < words.length; i++ ) {
+        
+        word = words[i].trim().toLowerCase();
+
+        if ( !commonObj[word] ) {
+            uncommonArr.push(word);
+        }
+    }
+    
+    return uncommonArr.join(' ');
+}
+
+function cleanName(text) {
+	var ret = ""+_.str(text).trim().toLowerCase();
+	
+	ret.diff(blacklist);
+
+	return ret;
+};
+
 function randomColor() {
 	var letters = '0123456789ABCDEF';
 	var color = '#';
@@ -61,10 +92,44 @@ var map = new L.Map('map', {
 	})
 });
 
+var blacklist = [];
+
+$.ajax({
+	async: false,
+	url: 'data/highway_blacklist_name.csv',
+	success: function(text) {
+		blacklist = _.flatten(csv.toArrays(text));
+	}
+});
 
 $.getJSON('data/highway.json', function(json) {
 
 	//TODO normalize properties name:it short_name to only name
+	
+console.log('BEFORE',json);
+
+	var fgroups = _.groupBy(json.features, function(f) {
+		return f.properties.name;
+	});
+
+	json.features = _.map(fgroups, function(ff) {
+		//console.log(ff)
+
+		var f1 = ff[0];
+
+		for(var f in ff) {
+			
+			if(f1.geometry.coordinates[0]==ff[f].geometry.coordinates[0])
+				ff[f].geometry.coordinates = ff[f].geometry.coordinates.reverse();
+
+			f1.geometry.coordinates = _.union(f1.geometry.coordinates, ff[f].geometry.coordinates);
+		}
+
+		return f1;
+	});
+
+console.log('AFTER',json);
+
 
 	var geo = L.geoJSON(json, {
 			style: function(f) {
@@ -75,8 +140,10 @@ $.getJSON('data/highway.json', function(json) {
 				};
 			},
 			onEachFeature: function (f, layer) {
+
+				f.properties.cleanName = getUncommon(f.properties.name, blacklist);
 				
-				layer.bindTooltip(f.properties.name);
+				layer.bindTooltip(f.properties.name);//+'<br /><i>'+f.properties.cleanName+'</i>');
 
 				//layer.bindPopup('<h2>'+f.properties.name+'</h2>');
 				layer.on('mouseover', function(e) {
@@ -98,16 +165,19 @@ $.getJSON('data/highway.json', function(json) {
 
 					L.DomEvent.stopPropagation(e)
 
-					var name = e.target.feature.properties.name;
-
 					var ranks = [];
 
 					geo.eachLayer(function(l) {
 						
-						ranks.push({
-							lev: name.levenstein( l.feature.properties.name ),
-							layer: l,
-						});
+						var lev = e.target.feature.properties.cleanName.levenstein( l.feature.properties.cleanName );
+
+						if( lev < 4) {
+							ranks.push({
+								lev: lev,
+								name: l.feature.properties.name,
+								layer: l,
+							});
+						}
 
 						l.setStyle({
 							opacity: 0.2
@@ -117,14 +187,12 @@ $.getJSON('data/highway.json', function(json) {
 					ranks = _.sortBy(ranks, 'lev');//.reverse();
 					ranks = _.first(ranks, 10);
 
-					for(let r in ranks){
+					for(let r in ranks) {
 						
-						//console.log(ranks[r].lev, ranks[r].layer.feature.properties.name);
-
 						ranks[r].layer.setStyle({
 							opacity: 1,
 							weight: 10
-						}).openTooltip();
+						}).bindTooltip(ranks[r].name+'<br /><b>'+ranks[r].lev+'</b>').openTooltip();
 					}
 
 				});
@@ -143,7 +211,989 @@ $.getJSON('data/highway.json', function(json) {
 	});
 
 });
-},{"jquery":2,"latinize":3,"leaflet":4,"underscore":76,"underscore.string":30}],2:[function(require,module,exports){
+},{"jquery":3,"jquery-csv":2,"latinize":4,"leaflet":5,"underscore":77,"underscore.string":31}],2:[function(require,module,exports){
+/**
+ * jQuery-csv (jQuery Plugin)
+ *
+ * This document is licensed as free software under the terms of the
+ * MIT License: http://www.opensource.org/licenses/mit-license.php
+ *
+ * Acknowledgements:
+ * The original design and influence to implement this library as a jquery
+ * plugin is influenced by jquery-json (http://code.google.com/p/jquery-json/).
+ * If you're looking to use native JSON.Stringify but want additional backwards
+ * compatibility for browsers that don't support it, I highly recommend you
+ * check it out.
+ *
+ * A special thanks goes out to rwk@acm.org for providing a lot of valuable
+ * feedback to the project including the core for the new FSM
+ * (Finite State Machine) parsers. If you're looking for a stable TSV parser
+ * be sure to take a look at jquery-tsv (http://code.google.com/p/jquery-tsv/).
+
+ * For legal purposes I'll include the "NO WARRANTY EXPRESSED OR IMPLIED.
+ * USE AT YOUR OWN RISK.". Which, in 'layman's terms' means, by using this
+ * library you are accepting responsibility if it breaks your code.
+ *
+ * Legal jargon aside, I will do my best to provide a useful and stable core
+ * that can effectively be built on.
+ *
+ * Copyrighted 2012 by Evan Plaice.
+ */
+
+RegExp.escape = function (s) {
+  return s.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+};
+
+(function () {
+  'use strict';
+
+  var $;
+
+  // to keep backwards compatibility
+  if (typeof jQuery !== 'undefined' && jQuery) {
+    $ = jQuery;
+  } else {
+    $ = {};
+  }
+
+  /**
+   * jQuery.csv.defaults
+   * Encapsulates the method paramater defaults for the CSV plugin module.
+   */
+
+  $.csv = {
+    defaults: {
+      separator: ',',
+      delimiter: '"',
+      headers: true
+    },
+
+    hooks: {
+      castToScalar: function (value, state) {
+        var hasDot = /\./;
+        if (isNaN(value)) {
+          return value;
+        } else {
+          if (hasDot.test(value)) {
+            return parseFloat(value);
+          } else {
+            var integer = parseInt(value);
+            if (isNaN(integer)) {
+              return null;
+            } else {
+              return integer;
+            }
+          }
+        }
+      }
+    },
+
+    parsers: {
+      parse: function (csv, options) {
+        // cache settings
+        var separator = options.separator;
+        var delimiter = options.delimiter;
+
+        // set initial state if it's missing
+        if (!options.state.rowNum) {
+          options.state.rowNum = 1;
+        }
+        if (!options.state.colNum) {
+          options.state.colNum = 1;
+        }
+
+        // clear initial state
+        var data = [];
+        var entry = [];
+        var state = 0;
+        var value = '';
+        var exit = false;
+
+        function endOfEntry () {
+          // reset the state
+          state = 0;
+          value = '';
+
+          // if 'start' hasn't been met, don't output
+          if (options.start && options.state.rowNum < options.start) {
+            // update global state
+            entry = [];
+            options.state.rowNum++;
+            options.state.colNum = 1;
+            return;
+          }
+
+          if (options.onParseEntry === undefined) {
+            // onParseEntry hook not set
+            data.push(entry);
+          } else {
+            var hookVal = options.onParseEntry(entry, options.state); // onParseEntry Hook
+            // false skips the row, configurable through a hook
+            if (hookVal !== false) {
+              data.push(hookVal);
+            }
+          }
+          // console.log('entry:' + entry);
+
+          // cleanup
+          entry = [];
+
+          // if 'end' is met, stop parsing
+          if (options.end && options.state.rowNum >= options.end) {
+            exit = true;
+          }
+
+          // update global state
+          options.state.rowNum++;
+          options.state.colNum = 1;
+        }
+
+        function endOfValue () {
+          if (options.onParseValue === undefined) {
+            // onParseValue hook not set
+            entry.push(value);
+          } else {
+            var hook = options.onParseValue(value, options.state); // onParseValue Hook
+            // false skips the row, configurable through a hook
+            if (hook !== false) {
+              entry.push(hook);
+            }
+          }
+          // console.log('value:' + value);
+          // reset the state
+          value = '';
+          state = 0;
+          // update global state
+          options.state.colNum++;
+        }
+
+        // escape regex-specific control chars
+        var escSeparator = RegExp.escape(separator);
+        var escDelimiter = RegExp.escape(delimiter);
+
+        // compile the regEx str using the custom delimiter/separator
+        var match = /(D|S|\r\n|\n|\r|[^DS\r\n]+)/;
+        var matchSrc = match.source;
+        matchSrc = matchSrc.replace(/S/g, escSeparator);
+        matchSrc = matchSrc.replace(/D/g, escDelimiter);
+        match = new RegExp(matchSrc, 'gm');
+
+        // put on your fancy pants...
+        // process control chars individually, use look-ahead on non-control chars
+        csv.replace(match, function (m0) {
+          if (exit) {
+            return;
+          }
+          switch (state) {
+            // the start of a value
+            case 0:
+              // null last value
+              if (m0 === separator) {
+                value += '';
+                endOfValue();
+                break;
+              }
+              // opening delimiter
+              if (m0 === delimiter) {
+                state = 1;
+                break;
+              }
+              // null last value
+              if (/^(\r\n|\n|\r)$/.test(m0)) {
+                endOfValue();
+                endOfEntry();
+                break;
+              }
+              // un-delimited value
+              value += m0;
+              state = 3;
+              break;
+
+            // delimited input
+            case 1:
+              // second delimiter? check further
+              if (m0 === delimiter) {
+                state = 2;
+                break;
+              }
+              // delimited data
+              value += m0;
+              state = 1;
+              break;
+
+            // delimiter found in delimited input
+            case 2:
+              // escaped delimiter?
+              if (m0 === delimiter) {
+                value += m0;
+                state = 1;
+                break;
+              }
+              // null value
+              if (m0 === separator) {
+                endOfValue();
+                break;
+              }
+              // end of entry
+              if (/^(\r\n|\n|\r)$/.test(m0)) {
+                endOfValue();
+                endOfEntry();
+                break;
+              }
+              // broken paser?
+              throw new Error('CSVDataError: Illegal State [Row:' + options.state.rowNum + '][Col:' + options.state.colNum + ']');
+
+            // un-delimited input
+            case 3:
+              // null last value
+              if (m0 === separator) {
+                endOfValue();
+                break;
+              }
+              // end of entry
+              if (/^(\r\n|\n|\r)$/.test(m0)) {
+                endOfValue();
+                endOfEntry();
+                break;
+              }
+              if (m0 === delimiter) {
+              // non-compliant data
+                throw new Error('CSVDataError: Illegal Quote [Row:' + options.state.rowNum + '][Col:' + options.state.colNum + ']');
+              }
+              // broken parser?
+              throw new Error('CSVDataError: Illegal Data [Row:' + options.state.rowNum + '][Col:' + options.state.colNum + ']');
+            default:
+              // shenanigans
+              throw new Error('CSVDataError: Unknown State [Row:' + options.state.rowNum + '][Col:' + options.state.colNum + ']');
+          }
+          // console.log('val:' + m0 + ' state:' + state);
+        });
+
+        // submit the last entry
+        // ignore null last line
+        if (entry.length !== 0) {
+          endOfValue();
+          endOfEntry();
+        }
+
+        return data;
+      },
+
+      // a csv-specific line splitter
+      splitLines: function (csv, options) {
+        if (!csv) {
+          return undefined;
+        }
+
+        options = options || {};
+
+        // cache settings
+        var separator = options.separator || $.csv.defaults.separator;
+        var delimiter = options.delimiter || $.csv.defaults.delimiter;
+
+        // set initial state if it's missing
+        options.state = options.state || {};
+        if (!options.state.rowNum) {
+          options.state.rowNum = 1;
+        }
+
+        // clear initial state
+        var entries = [];
+        var state = 0;
+        var entry = '';
+        var exit = false;
+
+        function endOfLine () {
+          // reset the state
+          state = 0;
+
+          // if 'start' hasn't been met, don't output
+          if (options.start && options.state.rowNum < options.start) {
+            // update global state
+            entry = '';
+            options.state.rowNum++;
+            return;
+          }
+
+          if (options.onParseEntry === undefined) {
+            // onParseEntry hook not set
+            entries.push(entry);
+          } else {
+            var hookVal = options.onParseEntry(entry, options.state); // onParseEntry Hook
+            // false skips the row, configurable through a hook
+            if (hookVal !== false) {
+              entries.push(hookVal);
+            }
+          }
+
+          // cleanup
+          entry = '';
+
+          // if 'end' is met, stop parsing
+          if (options.end && options.state.rowNum >= options.end) {
+            exit = true;
+          }
+
+          // update global state
+          options.state.rowNum++;
+        }
+
+        // escape regex-specific control chars
+        var escSeparator = RegExp.escape(separator);
+        var escDelimiter = RegExp.escape(delimiter);
+
+        // compile the regEx str using the custom delimiter/separator
+        var match = /(D|S|\n|\r|[^DS\r\n]+)/;
+        var matchSrc = match.source;
+        matchSrc = matchSrc.replace(/S/g, escSeparator);
+        matchSrc = matchSrc.replace(/D/g, escDelimiter);
+        match = new RegExp(matchSrc, 'gm');
+
+        // put on your fancy pants...
+        // process control chars individually, use look-ahead on non-control chars
+        csv.replace(match, function (m0) {
+          if (exit) {
+            return;
+          }
+          switch (state) {
+            // the start of a value/entry
+            case 0:
+              // null value
+              if (m0 === separator) {
+                entry += m0;
+                state = 0;
+                break;
+              }
+              // opening delimiter
+              if (m0 === delimiter) {
+                entry += m0;
+                state = 1;
+                break;
+              }
+              // end of line
+              if (m0 === '\n') {
+                endOfLine();
+                break;
+              }
+              // phantom carriage return
+              if (/^\r$/.test(m0)) {
+                break;
+              }
+              // un-delimit value
+              entry += m0;
+              state = 3;
+              break;
+
+            // delimited input
+            case 1:
+              // second delimiter? check further
+              if (m0 === delimiter) {
+                entry += m0;
+                state = 2;
+                break;
+              }
+              // delimited data
+              entry += m0;
+              state = 1;
+              break;
+
+            // delimiter found in delimited input
+            case 2:
+              // escaped delimiter?
+              var prevChar = entry.substr(entry.length - 1);
+              if (m0 === delimiter && prevChar === delimiter) {
+                entry += m0;
+                state = 1;
+                break;
+              }
+              // end of value
+              if (m0 === separator) {
+                entry += m0;
+                state = 0;
+                break;
+              }
+              // end of line
+              if (m0 === '\n') {
+                endOfLine();
+                break;
+              }
+              // phantom carriage return
+              if (m0 === '\r') {
+                break;
+              }
+              // broken paser?
+              throw new Error('CSVDataError: Illegal state [Row:' + options.state.rowNum + ']');
+
+            // un-delimited input
+            case 3:
+              // null value
+              if (m0 === separator) {
+                entry += m0;
+                state = 0;
+                break;
+              }
+              // end of line
+              if (m0 === '\n') {
+                endOfLine();
+                break;
+              }
+              // phantom carriage return
+              if (m0 === '\r') {
+                break;
+              }
+              // non-compliant data
+              if (m0 === delimiter) {
+                throw new Error('CSVDataError: Illegal quote [Row:' + options.state.rowNum + ']');
+              }
+              // broken parser?
+              throw new Error('CSVDataError: Illegal state [Row:' + options.state.rowNum + ']');
+            default:
+              // shenanigans
+              throw new Error('CSVDataError: Unknown state [Row:' + options.state.rowNum + ']');
+          }
+          // console.log('val:' + m0 + ' state:' + state);
+        });
+
+        // submit the last entry
+        // ignore null last line
+        if (entry !== '') {
+          endOfLine();
+        }
+
+        return entries;
+      },
+
+      // a csv entry parser
+      parseEntry: function (csv, options) {
+        // cache settings
+        var separator = options.separator;
+        var delimiter = options.delimiter;
+
+        // set initial state if it's missing
+        if (!options.state.rowNum) {
+          options.state.rowNum = 1;
+        }
+        if (!options.state.colNum) {
+          options.state.colNum = 1;
+        }
+
+        // clear initial state
+        var entry = [];
+        var state = 0;
+        var value = '';
+
+        function endOfValue () {
+          if (options.onParseValue === undefined) {
+            // onParseValue hook not set
+            entry.push(value);
+          } else {
+            var hook = options.onParseValue(value, options.state); // onParseValue Hook
+            // false skips the value, configurable through a hook
+            if (hook !== false) {
+              entry.push(hook);
+            }
+          }
+          // reset the state
+          value = '';
+          state = 0;
+          // update global state
+          options.state.colNum++;
+        }
+
+        // checked for a cached regEx first
+        if (!options.match) {
+          // escape regex-specific control chars
+          var escSeparator = RegExp.escape(separator);
+          var escDelimiter = RegExp.escape(delimiter);
+
+          // compile the regEx str using the custom delimiter/separator
+          var match = /(D|S|\n|\r|[^DS\r\n]+)/;
+          var matchSrc = match.source;
+          matchSrc = matchSrc.replace(/S/g, escSeparator);
+          matchSrc = matchSrc.replace(/D/g, escDelimiter);
+          options.match = new RegExp(matchSrc, 'gm');
+        }
+
+        // put on your fancy pants...
+        // process control chars individually, use look-ahead on non-control chars
+        csv.replace(options.match, function (m0) {
+          switch (state) {
+            // the start of a value
+            case 0:
+              // null last value
+              if (m0 === separator) {
+                value += '';
+                endOfValue();
+                break;
+              }
+              // opening delimiter
+              if (m0 === delimiter) {
+                state = 1;
+                break;
+              }
+              // skip un-delimited new-lines
+              if (m0 === '\n' || m0 === '\r') {
+                break;
+              }
+              // un-delimited value
+              value += m0;
+              state = 3;
+              break;
+
+            // delimited input
+            case 1:
+              // second delimiter? check further
+              if (m0 === delimiter) {
+                state = 2;
+                break;
+              }
+              // delimited data
+              value += m0;
+              state = 1;
+              break;
+
+            // delimiter found in delimited input
+            case 2:
+              // escaped delimiter?
+              if (m0 === delimiter) {
+                value += m0;
+                state = 1;
+                break;
+              }
+              // null value
+              if (m0 === separator) {
+                endOfValue();
+                break;
+              }
+              // skip un-delimited new-lines
+              if (m0 === '\n' || m0 === '\r') {
+                break;
+              }
+              // broken paser?
+              throw new Error('CSVDataError: Illegal State [Row:' + options.state.rowNum + '][Col:' + options.state.colNum + ']');
+
+            // un-delimited input
+            case 3:
+              // null last value
+              if (m0 === separator) {
+                endOfValue();
+                break;
+              }
+              // skip un-delimited new-lines
+              if (m0 === '\n' || m0 === '\r') {
+                break;
+              }
+              // non-compliant data
+              if (m0 === delimiter) {
+                throw new Error('CSVDataError: Illegal Quote [Row:' + options.state.rowNum + '][Col:' + options.state.colNum + ']');
+              }
+              // broken parser?
+              throw new Error('CSVDataError: Illegal Data [Row:' + options.state.rowNum + '][Col:' + options.state.colNum + ']');
+            default:
+              // shenanigans
+              throw new Error('CSVDataError: Unknown State [Row:' + options.state.rowNum + '][Col:' + options.state.colNum + ']');
+          }
+          // console.log('val:' + m0 + ' state:' + state);
+        });
+
+        // submit the last value
+        endOfValue();
+
+        return entry;
+      }
+    },
+
+    helpers: {
+
+      /**
+       * $.csv.helpers.collectPropertyNames(objectsArray)
+       * Collects all unique property names from all passed objects.
+       *
+       * @param {Array} objects Objects to collect properties from.
+       *
+       * Returns an array of property names (array will be empty,
+       * if objects have no own properties).
+       */
+      collectPropertyNames: function (objects) {
+        var o = [];
+        var propName = [];
+        var props = [];
+        for (o in objects) {
+          for (propName in objects[o]) {
+            if ((objects[o].hasOwnProperty(propName)) &&
+                (props.indexOf(propName) < 0) &&
+                (typeof objects[o][propName] !== 'function')) {
+              props.push(propName);
+            }
+          }
+        }
+        return props;
+      }
+    },
+
+    /**
+     * $.csv.toArray(csv)
+     * Converts a CSV entry string to a javascript array.
+     *
+     * @param {Array} csv The string containing the CSV data.
+     * @param {Object} [options] An object containing user-defined options.
+     * @param {Character} [separator] An override for the separator character. Defaults to a comma(,).
+     * @param {Character} [delimiter] An override for the delimiter character. Defaults to a double-quote(").
+     *
+     * This method deals with simple CSV strings only. It's useful if you only
+     * need to parse a single entry. If you need to parse more than one line,
+     * use $.csv2Array instead.
+     */
+    toArray: function (csv, options, callback) {
+      options = (options !== undefined ? options : {});
+      var config = {};
+      config.callback = ((callback !== undefined && typeof (callback) === 'function') ? callback : false);
+      config.separator = 'separator' in options ? options.separator : $.csv.defaults.separator;
+      config.delimiter = 'delimiter' in options ? options.delimiter : $.csv.defaults.delimiter;
+      var state = (options.state !== undefined ? options.state : {});
+
+      // setup
+      options = {
+        delimiter: config.delimiter,
+        separator: config.separator,
+        onParseEntry: options.onParseEntry,
+        onParseValue: options.onParseValue,
+        state: state
+      };
+
+      var entry = $.csv.parsers.parseEntry(csv, options);
+
+      // push the value to a callback if one is defined
+      if (!config.callback) {
+        return entry;
+      } else {
+        config.callback('', entry);
+      }
+    },
+
+    /**
+     * $.csv.toArrays(csv)
+     * Converts a CSV string to a javascript array.
+     *
+     * @param {String} csv The string containing the raw CSV data.
+     * @param {Object} [options] An object containing user-defined options.
+     * @param {Character} [separator] An override for the separator character. Defaults to a comma(,).
+     * @param {Character} [delimiter] An override for the delimiter character. Defaults to a double-quote(").
+     *
+     * This method deals with multi-line CSV. The breakdown is simple. The first
+     * dimension of the array represents the line (or entry/row) while the second
+     * dimension contains the values (or values/columns).
+     */
+    toArrays: function (csv, options, callback) {
+      options = (options !== undefined ? options : {});
+      var config = {};
+      config.callback = ((callback !== undefined && typeof (callback) === 'function') ? callback : false);
+      config.separator = 'separator' in options ? options.separator : $.csv.defaults.separator;
+      config.delimiter = 'delimiter' in options ? options.delimiter : $.csv.defaults.delimiter;
+
+      // setup
+      var data = [];
+      options = {
+        delimiter: config.delimiter,
+        separator: config.separator,
+        onPreParse: options.onPreParse,
+        onParseEntry: options.onParseEntry,
+        onParseValue: options.onParseValue,
+        onPostParse: options.onPostParse,
+        start: options.start,
+        end: options.end,
+        state: {
+          rowNum: 1,
+          colNum: 1
+        }
+      };
+
+      // onPreParse hook
+      if (options.onPreParse !== undefined) {
+        options.onPreParse(csv, options.state);
+      }
+
+      // parse the data
+      data = $.csv.parsers.parse(csv, options);
+
+      // onPostParse hook
+      if (options.onPostParse !== undefined) {
+        options.onPostParse(data, options.state);
+      }
+
+      // push the value to a callback if one is defined
+      if (!config.callback) {
+        return data;
+      } else {
+        config.callback('', data);
+      }
+    },
+
+    /**
+     * $.csv.toObjects(csv)
+     * Converts a CSV string to a javascript object.
+     * @param {String} csv The string containing the raw CSV data.
+     * @param {Object} [options] An object containing user-defined options.
+     * @param {Character} [separator] An override for the separator character. Defaults to a comma(,).
+     * @param {Character} [delimiter] An override for the delimiter character. Defaults to a double-quote(").
+     * @param {Boolean} [headers] Indicates whether the data contains a header line. Defaults to true.
+     *
+     * This method deals with multi-line CSV strings. Where the headers line is
+     * used as the key for each value per entry.
+     */
+    toObjects: function (csv, options, callback) {
+      options = (options !== undefined ? options : {});
+      var config = {};
+      config.callback = ((callback !== undefined && typeof (callback) === 'function') ? callback : false);
+      config.separator = 'separator' in options ? options.separator : $.csv.defaults.separator;
+      config.delimiter = 'delimiter' in options ? options.delimiter : $.csv.defaults.delimiter;
+      config.headers = 'headers' in options ? options.headers : $.csv.defaults.headers;
+      options.start = 'start' in options ? options.start : 1;
+
+      // account for headers
+      if (config.headers) {
+        options.start++;
+      }
+      if (options.end && config.headers) {
+        options.end++;
+      }
+
+      // setup
+      var lines = [];
+      var data = [];
+
+      options = {
+        delimiter: config.delimiter,
+        separator: config.separator,
+        onPreParse: options.onPreParse,
+        onParseEntry: options.onParseEntry,
+        onParseValue: options.onParseValue,
+        onPostParse: options.onPostParse,
+        start: options.start,
+        end: options.end,
+        state: {
+          rowNum: 1,
+          colNum: 1
+        },
+        match: false,
+        transform: options.transform
+      };
+
+      // fetch the headers
+      var headerOptions = {
+        delimiter: config.delimiter,
+        separator: config.separator,
+        start: 1,
+        end: 1,
+        state: {
+          rowNum: 1,
+          colNum: 1
+        }
+      };
+
+      // onPreParse hook
+      if (options.onPreParse !== undefined) {
+        options.onPreParse(csv, options.state);
+      }
+
+      // parse the csv
+      var headerLine = $.csv.parsers.splitLines(csv, headerOptions);
+      var headers = $.csv.toArray(headerLine[0], options);
+
+      // fetch the data
+      lines = $.csv.parsers.splitLines(csv, options);
+
+      // reset the state for re-use
+      options.state.colNum = 1;
+      if (headers) {
+        options.state.rowNum = 2;
+      } else {
+        options.state.rowNum = 1;
+      }
+
+      // convert data to objects
+      for (var i = 0, len = lines.length; i < len; i++) {
+        var entry = $.csv.toArray(lines[i], options);
+        var object = {};
+        for (var j = 0; j < headers.length; j++) {
+          object[headers[j]] = entry[j];
+        }
+        if (options.transform !== undefined) {
+          data.push(options.transform.call(undefined, object));
+        } else {
+          data.push(object);
+        }
+
+        // update row state
+        options.state.rowNum++;
+      }
+
+      // onPostParse hook
+      if (options.onPostParse !== undefined) {
+        options.onPostParse(data, options.state);
+      }
+
+      // push the value to a callback if one is defined
+      if (!config.callback) {
+        return data;
+      } else {
+        config.callback('', data);
+      }
+    },
+
+    /**
+    * $.csv.fromArrays(arrays)
+    * Converts a javascript array to a CSV String.
+    *
+    * @param {Array} arrays An array containing an array of CSV entries.
+    * @param {Object} [options] An object containing user-defined options.
+    * @param {Character} [separator] An override for the separator character. Defaults to a comma(,).
+    * @param {Character} [delimiter] An override for the delimiter character. Defaults to a double-quote(").
+    *
+    * This method generates a CSV file from an array of arrays (representing entries).
+    */
+    fromArrays: function (arrays, options, callback) {
+      options = (options !== undefined ? options : {});
+      var config = {};
+      config.callback = ((callback !== undefined && typeof (callback) === 'function') ? callback : false);
+      config.separator = 'separator' in options ? options.separator : $.csv.defaults.separator;
+      config.delimiter = 'delimiter' in options ? options.delimiter : $.csv.defaults.delimiter;
+
+      var output = '';
+      var line;
+      var lineValues;
+      var i;
+      var j;
+
+      for (i = 0; i < arrays.length; i++) {
+        line = arrays[i];
+        lineValues = [];
+        for (j = 0; j < line.length; j++) {
+          var strValue = (line[j] === undefined || line[j] === null) ? '' : line[j].toString();
+          if (strValue.indexOf(config.delimiter) > -1) {
+            strValue = strValue.replace(new RegExp(config.delimiter, 'g'), config.delimiter + config.delimiter);
+          }
+
+          var escMatcher = '\n|\r|S|D';
+          escMatcher = escMatcher.replace('S', config.separator);
+          escMatcher = escMatcher.replace('D', config.delimiter);
+
+          if (strValue.search(escMatcher) > -1) {
+            strValue = config.delimiter + strValue + config.delimiter;
+          }
+          lineValues.push(strValue);
+        }
+        output += lineValues.join(config.separator) + '\n';
+      }
+
+      // push the value to a callback if one is defined
+      if (!config.callback) {
+        return output;
+      } else {
+        config.callback('', output);
+      }
+    },
+
+    /**
+     * $.csv.fromObjects(objects)
+     * Converts a javascript dictionary to a CSV string.
+     *
+     * @param {Object} objects An array of objects containing the data.
+     * @param {Object} [options] An object containing user-defined options.
+     * @param {Character} [separator] An override for the separator character. Defaults to a comma(,).
+     * @param {Character} [delimiter] An override for the delimiter character. Defaults to a double-quote(").
+     * @param {Character} [sortOrder] Sort order of columns (named after
+     *   object properties). Use 'alpha' for alphabetic. Default is 'declare',
+     *   which means, that properties will _probably_ appear in order they were
+     *   declared for the object. But without any guarantee.
+     * @param {Character or Array} [manualOrder] Manually order columns. May be
+     * a strin in a same csv format as an output or an array of header names
+     * (array items won't be parsed). All the properties, not present in
+     * `manualOrder` will be appended to the end in accordance with `sortOrder`
+     * option. So the `manualOrder` always takes preference, if present.
+     *
+     * This method generates a CSV file from an array of objects (name:value pairs).
+     * It starts by detecting the headers and adding them as the first line of
+     * the CSV file, followed by a structured dump of the data.
+     */
+    fromObjects: function (objects, options, callback) {
+      options = (options !== undefined ? options : {});
+      var config = {};
+      config.callback = ((callback !== undefined && typeof (callback) === 'function') ? callback : false);
+      config.separator = 'separator' in options ? options.separator : $.csv.defaults.separator;
+      config.delimiter = 'delimiter' in options ? options.delimiter : $.csv.defaults.delimiter;
+      config.headers = 'headers' in options ? options.headers : $.csv.defaults.headers;
+      config.sortOrder = 'sortOrder' in options ? options.sortOrder : 'declare';
+      config.manualOrder = 'manualOrder' in options ? options.manualOrder : [];
+      config.transform = options.transform;
+
+      if (typeof config.manualOrder === 'string') {
+        config.manualOrder = $.csv.toArray(config.manualOrder, config);
+      }
+
+      if (config.transform !== undefined) {
+        var origObjects = objects;
+        objects = [];
+
+        var i;
+        for (i = 0; i < origObjects.length; i++) {
+          objects.push(config.transform.call(undefined, origObjects[i]));
+        }
+      }
+
+      var props = $.csv.helpers.collectPropertyNames(objects);
+
+      if (config.sortOrder === 'alpha') {
+        props.sort();
+      } // else {} - nothing to do for 'declare' order
+
+      if (config.manualOrder.length > 0) {
+        var propsManual = [].concat(config.manualOrder);
+        let p;
+        for (p = 0; p < props.length; p++) {
+          if (propsManual.indexOf(props[p]) < 0) {
+            propsManual.push(props[p]);
+          }
+        }
+        props = propsManual;
+      }
+
+      var o, p, line, output, propName;
+      if (config.headers) {
+        output.push(props);
+      }
+
+      for (o = 0; o < objects.length; o++) {
+        line = [];
+        for (p = 0; p < props.length; p++) {
+          propName = props[p];
+          if (propName in objects[o] && typeof objects[o][propName] !== 'function') {
+            line.push(objects[o][propName]);
+          } else {
+            line.push('');
+          }
+        }
+        output.push(line);
+      }
+
+      // push the value to a callback if one is defined
+      return $.csv.fromArrays(output, options, config.callback);
+    }
+  };
+
+  // Maintenance code to maintain backward-compatibility
+  // Will be removed in release 1.0
+  $.csvEntry2Array = $.csv.toArray;
+  $.csv2Array = $.csv.toArrays;
+  $.csv2Dictionary = $.csv.toObjects;
+
+  // CommonJS module is defined
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = $.csv;
+  }
+}).call(this);
+
+},{}],3:[function(require,module,exports){
 /*!
  * jQuery JavaScript Library v3.3.1
  * https://jquery.com/
@@ -10509,7 +11559,7 @@ if ( !noGlobal ) {
 return jQuery;
 } );
 
-},{}],3:[function(require,module,exports){
+},{}],4:[function(require,module,exports){
 (function(root, factory) {
   if (typeof define === 'function' && define.amd) {
     // AMD. Register as an anonymous module.
@@ -11430,7 +12480,7 @@ return jQuery;
   return latinize;
 });
 
-},{}],4:[function(require,module,exports){
+},{}],5:[function(require,module,exports){
 /* @preserve
  * Leaflet 1.3.1, a JS library for interactive maps. http://leafletjs.com
  * (c) 2010-2017 Vladimir Agafonkin, (c) 2010-2011 CloudMade
@@ -25234,7 +26284,7 @@ exports.map = createMap;
 })));
 
 
-},{}],5:[function(require,module,exports){
+},{}],6:[function(require,module,exports){
 /* global window, exports, define */
 
 !function() {
@@ -25454,7 +26504,7 @@ exports.map = createMap;
     /* eslint-enable quote-props */
 }()
 
-},{}],6:[function(require,module,exports){
+},{}],7:[function(require,module,exports){
 var trim = require('./trim');
 var decap = require('./decapitalize');
 
@@ -25470,7 +26520,7 @@ module.exports = function camelize(str, decapitalize) {
   }
 };
 
-},{"./decapitalize":15,"./trim":68}],7:[function(require,module,exports){
+},{"./decapitalize":16,"./trim":69}],8:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function capitalize(str, lowercaseRest) {
@@ -25480,14 +26530,14 @@ module.exports = function capitalize(str, lowercaseRest) {
   return str.charAt(0).toUpperCase() + remainingChars;
 };
 
-},{"./helper/makeString":25}],8:[function(require,module,exports){
+},{"./helper/makeString":26}],9:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function chars(str) {
   return makeString(str).split('');
 };
 
-},{"./helper/makeString":25}],9:[function(require,module,exports){
+},{"./helper/makeString":26}],10:[function(require,module,exports){
 module.exports = function chop(str, step) {
   if (str == null) return [];
   str = String(str);
@@ -25495,7 +26545,7 @@ module.exports = function chop(str, step) {
   return step > 0 ? str.match(new RegExp('.{1,' + step + '}', 'g')) : [str];
 };
 
-},{}],10:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 var capitalize = require('./capitalize');
 var camelize = require('./camelize');
 var makeString = require('./helper/makeString');
@@ -25505,14 +26555,14 @@ module.exports = function classify(str) {
   return capitalize(camelize(str.replace(/[\W_]/g, ' ')).replace(/\s/g, ''));
 };
 
-},{"./camelize":6,"./capitalize":7,"./helper/makeString":25}],11:[function(require,module,exports){
+},{"./camelize":7,"./capitalize":8,"./helper/makeString":26}],12:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function clean(str) {
   return trim(str).replace(/\s\s+/g, ' ');
 };
 
-},{"./trim":68}],12:[function(require,module,exports){
+},{"./trim":69}],13:[function(require,module,exports){
 
 var makeString = require('./helper/makeString');
 
@@ -25536,7 +26586,7 @@ module.exports = function cleanDiacritics(str) {
   });
 };
 
-},{"./helper/makeString":25}],13:[function(require,module,exports){
+},{"./helper/makeString":26}],14:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function(str, substr) {
@@ -25548,14 +26598,14 @@ module.exports = function(str, substr) {
   return str.split(substr).length - 1;
 };
 
-},{"./helper/makeString":25}],14:[function(require,module,exports){
+},{"./helper/makeString":26}],15:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function dasherize(str) {
   return trim(str).replace(/([A-Z])/g, '-$1').replace(/[-_\s]+/g, '-').toLowerCase();
 };
 
-},{"./trim":68}],15:[function(require,module,exports){
+},{"./trim":69}],16:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function decapitalize(str) {
@@ -25563,7 +26613,7 @@ module.exports = function decapitalize(str) {
   return str.charAt(0).toLowerCase() + str.slice(1);
 };
 
-},{"./helper/makeString":25}],16:[function(require,module,exports){
+},{"./helper/makeString":26}],17:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 function getIndent(str) {
@@ -25593,7 +26643,7 @@ module.exports = function dedent(str, pattern) {
   return str.replace(reg, '');
 };
 
-},{"./helper/makeString":25}],17:[function(require,module,exports){
+},{"./helper/makeString":26}],18:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var toPositive = require('./helper/toPositive');
 
@@ -25608,7 +26658,7 @@ module.exports = function endsWith(str, ends, position) {
   return position >= 0 && str.indexOf(ends, position) === position;
 };
 
-},{"./helper/makeString":25,"./helper/toPositive":27}],18:[function(require,module,exports){
+},{"./helper/makeString":26,"./helper/toPositive":28}],19:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var escapeChars = require('./helper/escapeChars');
 
@@ -25627,7 +26677,7 @@ module.exports = function escapeHTML(str) {
   });
 };
 
-},{"./helper/escapeChars":22,"./helper/makeString":25}],19:[function(require,module,exports){
+},{"./helper/escapeChars":23,"./helper/makeString":26}],20:[function(require,module,exports){
 module.exports = function() {
   var result = {};
 
@@ -25639,7 +26689,7 @@ module.exports = function() {
   return result;
 };
 
-},{}],20:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 var makeString = require('./makeString');
 
 module.exports = function adjacent(str, direction) {
@@ -25650,7 +26700,7 @@ module.exports = function adjacent(str, direction) {
   return str.slice(0, -1) + String.fromCharCode(str.charCodeAt(str.length - 1) + direction);
 };
 
-},{"./makeString":25}],21:[function(require,module,exports){
+},{"./makeString":26}],22:[function(require,module,exports){
 var escapeRegExp = require('./escapeRegExp');
 
 module.exports = function defaultToWhiteSpace(characters) {
@@ -25662,7 +26712,7 @@ module.exports = function defaultToWhiteSpace(characters) {
     return '[' + escapeRegExp(characters) + ']';
 };
 
-},{"./escapeRegExp":23}],22:[function(require,module,exports){
+},{"./escapeRegExp":24}],23:[function(require,module,exports){
 /* We're explicitly defining the list of entities we want to escape.
 nbsp is an HTML entity, but we don't want to escape all space characters in a string, hence its omission in this map.
 
@@ -25683,14 +26733,14 @@ var escapeChars = {
 
 module.exports = escapeChars;
 
-},{}],23:[function(require,module,exports){
+},{}],24:[function(require,module,exports){
 var makeString = require('./makeString');
 
 module.exports = function escapeRegExp(str) {
   return makeString(str).replace(/([.*+?^=!:${}()|[\]\/\\])/g, '\\$1');
 };
 
-},{"./makeString":25}],24:[function(require,module,exports){
+},{"./makeString":26}],25:[function(require,module,exports){
 /*
 We're explicitly defining the list of entities that might see in escape HTML strings
 */
@@ -25711,7 +26761,7 @@ var htmlEntities = {
 
 module.exports = htmlEntities;
 
-},{}],25:[function(require,module,exports){
+},{}],26:[function(require,module,exports){
 /**
  * Ensure some object is a coerced to a string
  **/
@@ -25720,7 +26770,7 @@ module.exports = function makeString(object) {
   return '' + object;
 };
 
-},{}],26:[function(require,module,exports){
+},{}],27:[function(require,module,exports){
 module.exports = function strRepeat(str, qty){
   if (qty < 1) return '';
   var result = '';
@@ -25731,12 +26781,12 @@ module.exports = function strRepeat(str, qty){
   return result;
 };
 
-},{}],27:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 module.exports = function toPositive(number) {
   return number < 0 ? 0 : (+number || 0);
 };
 
-},{}],28:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 var capitalize = require('./capitalize');
 var underscored = require('./underscored');
 var trim = require('./trim');
@@ -25745,7 +26795,7 @@ module.exports = function humanize(str) {
   return capitalize(trim(underscored(str).replace(/_id$/, '').replace(/_/g, ' ')));
 };
 
-},{"./capitalize":7,"./trim":68,"./underscored":70}],29:[function(require,module,exports){
+},{"./capitalize":8,"./trim":69,"./underscored":71}],30:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function include(str, needle) {
@@ -25753,7 +26803,7 @@ module.exports = function include(str, needle) {
   return makeString(str).indexOf(needle) !== -1;
 };
 
-},{"./helper/makeString":25}],30:[function(require,module,exports){
+},{"./helper/makeString":26}],31:[function(require,module,exports){
 /*
 * Underscore.string
 * (c) 2010 Esa-Matti Suuronen <esa-matti aet suuronen dot org>
@@ -25898,21 +26948,21 @@ for (var method in prototypeMethods) prototype2method(prototypeMethods[method]);
 
 module.exports = s;
 
-},{"./camelize":6,"./capitalize":7,"./chars":8,"./chop":9,"./classify":10,"./clean":11,"./cleanDiacritics":12,"./count":13,"./dasherize":14,"./decapitalize":15,"./dedent":16,"./endsWith":17,"./escapeHTML":18,"./exports":19,"./helper/escapeRegExp":23,"./humanize":28,"./include":29,"./insert":31,"./isBlank":32,"./join":33,"./levenshtein":34,"./lines":35,"./lpad":36,"./lrpad":37,"./ltrim":38,"./map":39,"./naturalCmp":40,"./numberFormat":41,"./pad":42,"./pred":43,"./prune":44,"./quote":45,"./repeat":46,"./replaceAll":47,"./reverse":48,"./rpad":49,"./rtrim":50,"./slugify":51,"./splice":52,"./sprintf":53,"./startsWith":54,"./strLeft":55,"./strLeftBack":56,"./strRight":57,"./strRightBack":58,"./stripTags":59,"./succ":60,"./surround":61,"./swapCase":62,"./titleize":63,"./toBoolean":64,"./toNumber":65,"./toSentence":66,"./toSentenceSerial":67,"./trim":68,"./truncate":69,"./underscored":70,"./unescapeHTML":71,"./unquote":72,"./vsprintf":73,"./words":74,"./wrap":75}],31:[function(require,module,exports){
+},{"./camelize":7,"./capitalize":8,"./chars":9,"./chop":10,"./classify":11,"./clean":12,"./cleanDiacritics":13,"./count":14,"./dasherize":15,"./decapitalize":16,"./dedent":17,"./endsWith":18,"./escapeHTML":19,"./exports":20,"./helper/escapeRegExp":24,"./humanize":29,"./include":30,"./insert":32,"./isBlank":33,"./join":34,"./levenshtein":35,"./lines":36,"./lpad":37,"./lrpad":38,"./ltrim":39,"./map":40,"./naturalCmp":41,"./numberFormat":42,"./pad":43,"./pred":44,"./prune":45,"./quote":46,"./repeat":47,"./replaceAll":48,"./reverse":49,"./rpad":50,"./rtrim":51,"./slugify":52,"./splice":53,"./sprintf":54,"./startsWith":55,"./strLeft":56,"./strLeftBack":57,"./strRight":58,"./strRightBack":59,"./stripTags":60,"./succ":61,"./surround":62,"./swapCase":63,"./titleize":64,"./toBoolean":65,"./toNumber":66,"./toSentence":67,"./toSentenceSerial":68,"./trim":69,"./truncate":70,"./underscored":71,"./unescapeHTML":72,"./unquote":73,"./vsprintf":74,"./words":75,"./wrap":76}],32:[function(require,module,exports){
 var splice = require('./splice');
 
 module.exports = function insert(str, i, substr) {
   return splice(str, i, 0, substr);
 };
 
-},{"./splice":52}],32:[function(require,module,exports){
+},{"./splice":53}],33:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function isBlank(str) {
   return (/^\s*$/).test(makeString(str));
 };
 
-},{"./helper/makeString":25}],33:[function(require,module,exports){
+},{"./helper/makeString":26}],34:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var slice = [].slice;
 
@@ -25923,7 +26973,7 @@ module.exports = function join() {
   return args.join(makeString(separator));
 };
 
-},{"./helper/makeString":25}],34:[function(require,module,exports){
+},{"./helper/makeString":26}],35:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 /**
@@ -25977,27 +27027,27 @@ module.exports = function levenshtein(str1, str2) {
   return nextCol;
 };
 
-},{"./helper/makeString":25}],35:[function(require,module,exports){
+},{"./helper/makeString":26}],36:[function(require,module,exports){
 module.exports = function lines(str) {
   if (str == null) return [];
   return String(str).split(/\r\n?|\n/);
 };
 
-},{}],36:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function lpad(str, length, padStr) {
   return pad(str, length, padStr);
 };
 
-},{"./pad":42}],37:[function(require,module,exports){
+},{"./pad":43}],38:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function lrpad(str, length, padStr) {
   return pad(str, length, padStr, 'both');
 };
 
-},{"./pad":42}],38:[function(require,module,exports){
+},{"./pad":43}],39:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrimLeft = String.prototype.trimLeft;
@@ -26009,7 +27059,7 @@ module.exports = function ltrim(str, characters) {
   return str.replace(new RegExp('^' + characters + '+'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":21,"./helper/makeString":25}],39:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":22,"./helper/makeString":26}],40:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function(str, callback) {
@@ -26020,7 +27070,7 @@ module.exports = function(str, callback) {
   return str.replace(/./g, callback);
 };
 
-},{"./helper/makeString":25}],40:[function(require,module,exports){
+},{"./helper/makeString":26}],41:[function(require,module,exports){
 module.exports = function naturalCmp(str1, str2) {
   if (str1 == str2) return 0;
   if (!str1) return -1;
@@ -26051,7 +27101,7 @@ module.exports = function naturalCmp(str1, str2) {
   return str1 < str2 ? -1 : 1;
 };
 
-},{}],41:[function(require,module,exports){
+},{}],42:[function(require,module,exports){
 module.exports = function numberFormat(number, dec, dsep, tsep) {
   if (isNaN(number) || number == null) return '';
 
@@ -26065,7 +27115,7 @@ module.exports = function numberFormat(number, dec, dsep, tsep) {
   return fnums.replace(/(\d)(?=(?:\d{3})+$)/g, '$1' + tsep) + decimals;
 };
 
-},{}],42:[function(require,module,exports){
+},{}],43:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var strRepeat = require('./helper/strRepeat');
 
@@ -26093,14 +27143,14 @@ module.exports = function pad(str, length, padStr, type) {
   }
 };
 
-},{"./helper/makeString":25,"./helper/strRepeat":26}],43:[function(require,module,exports){
+},{"./helper/makeString":26,"./helper/strRepeat":27}],44:[function(require,module,exports){
 var adjacent = require('./helper/adjacent');
 
 module.exports = function succ(str) {
   return adjacent(str, -1);
 };
 
-},{"./helper/adjacent":20}],44:[function(require,module,exports){
+},{"./helper/adjacent":21}],45:[function(require,module,exports){
 /**
  * _s.prune: a more elegant version of truncate
  * prune extra chars, never leaving a half-chopped word.
@@ -26129,14 +27179,14 @@ module.exports = function prune(str, length, pruneStr) {
   return (template + pruneStr).length > str.length ? str : str.slice(0, template.length) + pruneStr;
 };
 
-},{"./helper/makeString":25,"./rtrim":50}],45:[function(require,module,exports){
+},{"./helper/makeString":26,"./rtrim":51}],46:[function(require,module,exports){
 var surround = require('./surround');
 
 module.exports = function quote(str, quoteChar) {
   return surround(str, quoteChar || '"');
 };
 
-},{"./surround":61}],46:[function(require,module,exports){
+},{"./surround":62}],47:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var strRepeat = require('./helper/strRepeat');
 
@@ -26154,7 +27204,7 @@ module.exports = function repeat(str, qty, separator) {
   return repeat.join(separator);
 };
 
-},{"./helper/makeString":25,"./helper/strRepeat":26}],47:[function(require,module,exports){
+},{"./helper/makeString":26,"./helper/strRepeat":27}],48:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function replaceAll(str, find, replace, ignorecase) {
@@ -26164,21 +27214,21 @@ module.exports = function replaceAll(str, find, replace, ignorecase) {
   return makeString(str).replace(reg, replace);
 };
 
-},{"./helper/makeString":25}],48:[function(require,module,exports){
+},{"./helper/makeString":26}],49:[function(require,module,exports){
 var chars = require('./chars');
 
 module.exports = function reverse(str) {
   return chars(str).reverse().join('');
 };
 
-},{"./chars":8}],49:[function(require,module,exports){
+},{"./chars":9}],50:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function rpad(str, length, padStr) {
   return pad(str, length, padStr, 'right');
 };
 
-},{"./pad":42}],50:[function(require,module,exports){
+},{"./pad":43}],51:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrimRight = String.prototype.trimRight;
@@ -26190,7 +27240,7 @@ module.exports = function rtrim(str, characters) {
   return str.replace(new RegExp(characters + '+$'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":21,"./helper/makeString":25}],51:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":22,"./helper/makeString":26}],52:[function(require,module,exports){
 var trim = require('./trim');
 var dasherize = require('./dasherize');
 var cleanDiacritics = require('./cleanDiacritics');
@@ -26199,7 +27249,7 @@ module.exports = function slugify(str) {
   return trim(dasherize(cleanDiacritics(str).replace(/[^\w\s-]/g, '-').toLowerCase()), '-');
 };
 
-},{"./cleanDiacritics":12,"./dasherize":14,"./trim":68}],52:[function(require,module,exports){
+},{"./cleanDiacritics":13,"./dasherize":15,"./trim":69}],53:[function(require,module,exports){
 var chars = require('./chars');
 
 module.exports = function splice(str, i, howmany, substr) {
@@ -26208,13 +27258,13 @@ module.exports = function splice(str, i, howmany, substr) {
   return arr.join('');
 };
 
-},{"./chars":8}],53:[function(require,module,exports){
+},{"./chars":9}],54:[function(require,module,exports){
 var deprecate = require('util-deprecate');
 
 module.exports = deprecate(require('sprintf-js').sprintf,
   'sprintf() will be removed in the next major release, use the sprintf-js package instead.');
 
-},{"sprintf-js":5,"util-deprecate":77}],54:[function(require,module,exports){
+},{"sprintf-js":6,"util-deprecate":78}],55:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var toPositive = require('./helper/toPositive');
 
@@ -26225,7 +27275,7 @@ module.exports = function startsWith(str, starts, position) {
   return str.lastIndexOf(starts, position) === position;
 };
 
-},{"./helper/makeString":25,"./helper/toPositive":27}],55:[function(require,module,exports){
+},{"./helper/makeString":26,"./helper/toPositive":28}],56:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strLeft(str, sep) {
@@ -26235,7 +27285,7 @@ module.exports = function strLeft(str, sep) {
   return~ pos ? str.slice(0, pos) : str;
 };
 
-},{"./helper/makeString":25}],56:[function(require,module,exports){
+},{"./helper/makeString":26}],57:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strLeftBack(str, sep) {
@@ -26245,7 +27295,7 @@ module.exports = function strLeftBack(str, sep) {
   return~ pos ? str.slice(0, pos) : str;
 };
 
-},{"./helper/makeString":25}],57:[function(require,module,exports){
+},{"./helper/makeString":26}],58:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strRight(str, sep) {
@@ -26255,7 +27305,7 @@ module.exports = function strRight(str, sep) {
   return~ pos ? str.slice(pos + sep.length, str.length) : str;
 };
 
-},{"./helper/makeString":25}],58:[function(require,module,exports){
+},{"./helper/makeString":26}],59:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strRightBack(str, sep) {
@@ -26265,26 +27315,26 @@ module.exports = function strRightBack(str, sep) {
   return~ pos ? str.slice(pos + sep.length, str.length) : str;
 };
 
-},{"./helper/makeString":25}],59:[function(require,module,exports){
+},{"./helper/makeString":26}],60:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function stripTags(str) {
   return makeString(str).replace(/<\/?[^>]+>/g, '');
 };
 
-},{"./helper/makeString":25}],60:[function(require,module,exports){
+},{"./helper/makeString":26}],61:[function(require,module,exports){
 var adjacent = require('./helper/adjacent');
 
 module.exports = function succ(str) {
   return adjacent(str, 1);
 };
 
-},{"./helper/adjacent":20}],61:[function(require,module,exports){
+},{"./helper/adjacent":21}],62:[function(require,module,exports){
 module.exports = function surround(str, wrapper) {
   return [wrapper, str, wrapper].join('');
 };
 
-},{}],62:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function swapCase(str) {
@@ -26293,7 +27343,7 @@ module.exports = function swapCase(str) {
   });
 };
 
-},{"./helper/makeString":25}],63:[function(require,module,exports){
+},{"./helper/makeString":26}],64:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function titleize(str) {
@@ -26302,7 +27352,7 @@ module.exports = function titleize(str) {
   });
 };
 
-},{"./helper/makeString":25}],64:[function(require,module,exports){
+},{"./helper/makeString":26}],65:[function(require,module,exports){
 var trim = require('./trim');
 
 function boolMatch(s, matchers) {
@@ -26324,14 +27374,14 @@ module.exports = function toBoolean(str, trueValues, falseValues) {
   if (boolMatch(str, falseValues || ['false', '0'])) return false;
 };
 
-},{"./trim":68}],65:[function(require,module,exports){
+},{"./trim":69}],66:[function(require,module,exports){
 module.exports = function toNumber(num, precision) {
   if (num == null) return 0;
   var factor = Math.pow(10, isFinite(precision) ? precision : 0);
   return Math.round(num * factor) / factor;
 };
 
-},{}],66:[function(require,module,exports){
+},{}],67:[function(require,module,exports){
 var rtrim = require('./rtrim');
 
 module.exports = function toSentence(array, separator, lastSeparator, serial) {
@@ -26345,14 +27395,14 @@ module.exports = function toSentence(array, separator, lastSeparator, serial) {
   return a.length ? a.join(separator) + lastSeparator + lastMember : lastMember;
 };
 
-},{"./rtrim":50}],67:[function(require,module,exports){
+},{"./rtrim":51}],68:[function(require,module,exports){
 var toSentence = require('./toSentence');
 
 module.exports = function toSentenceSerial(array, sep, lastSep) {
   return toSentence(array, sep, lastSep, true);
 };
 
-},{"./toSentence":66}],68:[function(require,module,exports){
+},{"./toSentence":67}],69:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrim = String.prototype.trim;
@@ -26364,7 +27414,7 @@ module.exports = function trim(str, characters) {
   return str.replace(new RegExp('^' + characters + '+|' + characters + '+$', 'g'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":21,"./helper/makeString":25}],69:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":22,"./helper/makeString":26}],70:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function truncate(str, length, truncateStr) {
@@ -26374,14 +27424,14 @@ module.exports = function truncate(str, length, truncateStr) {
   return str.length > length ? str.slice(0, length) + truncateStr : str;
 };
 
-},{"./helper/makeString":25}],70:[function(require,module,exports){
+},{"./helper/makeString":26}],71:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function underscored(str) {
   return trim(str).replace(/([a-z\d])([A-Z]+)/g, '$1_$2').replace(/[-\s]+/g, '_').toLowerCase();
 };
 
-},{"./trim":68}],71:[function(require,module,exports){
+},{"./trim":69}],72:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var htmlEntities = require('./helper/htmlEntities');
 
@@ -26403,7 +27453,7 @@ module.exports = function unescapeHTML(str) {
   });
 };
 
-},{"./helper/htmlEntities":24,"./helper/makeString":25}],72:[function(require,module,exports){
+},{"./helper/htmlEntities":25,"./helper/makeString":26}],73:[function(require,module,exports){
 module.exports = function unquote(str, quoteChar) {
   quoteChar = quoteChar || '"';
   if (str[0] === quoteChar && str[str.length - 1] === quoteChar)
@@ -26411,13 +27461,13 @@ module.exports = function unquote(str, quoteChar) {
   else return str;
 };
 
-},{}],73:[function(require,module,exports){
+},{}],74:[function(require,module,exports){
 var deprecate = require('util-deprecate');
 
 module.exports = deprecate(require('sprintf-js').vsprintf,
   'vsprintf() will be removed in the next major release, use the sprintf-js package instead.');
 
-},{"sprintf-js":5,"util-deprecate":77}],74:[function(require,module,exports){
+},{"sprintf-js":6,"util-deprecate":78}],75:[function(require,module,exports){
 var isBlank = require('./isBlank');
 var trim = require('./trim');
 
@@ -26426,7 +27476,7 @@ module.exports = function words(str, delimiter) {
   return trim(str, delimiter).split(delimiter || /\s+/);
 };
 
-},{"./isBlank":32,"./trim":68}],75:[function(require,module,exports){
+},{"./isBlank":33,"./trim":69}],76:[function(require,module,exports){
 // Wrap
 // wraps a string by a certain width
 
@@ -26530,7 +27580,7 @@ module.exports = function wrap(str, options){
   }
 };
 
-},{"./helper/makeString":25}],76:[function(require,module,exports){
+},{"./helper/makeString":26}],77:[function(require,module,exports){
 //     Underscore.js 1.8.3
 //     http://underscorejs.org
 //     (c) 2009-2015 Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
@@ -28080,7 +29130,7 @@ module.exports = function wrap(str, options){
   }
 }.call(this));
 
-},{}],77:[function(require,module,exports){
+},{}],78:[function(require,module,exports){
 (function (global){
 
 /**
