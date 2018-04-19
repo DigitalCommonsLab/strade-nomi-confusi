@@ -27,7 +27,7 @@ How to generate a list of *commons bad words*
 * [csvs-to-sqlite](https://github.com/simonw/csvs-to-sqlite)
 
 SQL Query:
-```
+```sql
 SELECT DISTINCT LOWER(SUBSTR(name, 0, INSTR(name, ' '))) AS word1
 FROM highway 
 WHERE highway.highway <> '' 
