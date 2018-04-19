@@ -22,11 +22,16 @@ data/
 ```
 
 ## Bad words
+
+How to generate a list of *commons bad words*
+* [csvs-to-sqlite](https://github.com/simonw/csvs-to-sqlite)
+
+SQL Query:
 ```
-select distinct lower(name) 
-from highway 
-where highway.highway <> '' 
-order by name
+SELECT DISTINCT LOWER(SUBSTR(name, 0, INSTR(name, ' '))) AS word1
+FROM highway 
+WHERE highway.highway <> '' 
+ORDER BY word1
 ```
 highway.sqlite -> highway_distinct_name.csv:
 
