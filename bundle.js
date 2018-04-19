@@ -273,8 +273,9 @@ console.log('dissolve: ',json);
 			return '<a href="#">'+name+'</a>';
 		},
 		moveToLocation: function(latlng, title, map) {
-			var zoom = map.getBoundsZoom(latlng.layer.getBounds());
-  			map.setView(latlng, zoom); // access the zoom
+			//var zoom = map.getBoundsZoom(latlng.layer.getBounds());
+  			//map.setView(latlng, zoom); // access the zoom
+  			latlng.layer.fire('click')
 		}
 	}).on('search:locationfound', function(e) {
 		e.layer.openTooltip();
