@@ -21,6 +21,7 @@ var $ = require('jquery'),
 	latinize = require('latinize'),
 	csv = require('jquery-csv'),
 	L = require('leaflet'),
+	Search = require('leaflet-search'),
 	dissolve = require('geojson-dissolve');
 	//Panel = require('leaflet-panel-layers');
 
@@ -260,6 +261,24 @@ console.log('dissolve: ',json);
 	//TODO fitBounds(json.bbox)
 	geo.addTo(map);
 	//
+	//
+	L.control.search({
+		layer: geo,
+		propertyName: 'name',
+		marker: false,
+		initial: false,
+		casesensitive: false,
+		buildTip: function(text, val) {
+			var name = val.layer.feature.properties.name;
+			return '<a href="#">'+name+'</a>';
+		},
+		moveToLocation: function(latlng, title, map) {
+			var zoom = map.getBoundsZoom(latlng.layer.getBounds());
+  			map.setView(latlng, zoom); // access the zoom
+		}
+	}).on('search:locationfound', function(e) {
+		e.layer.openTooltip();
+	}).addTo(map);
 
 	map.on('click', function(e) {
 		geo.eachLayer(function(l) {
@@ -271,7 +290,7 @@ console.log('dissolve: ',json);
 	});
 
 });
-},{"damerau-levenshtein":3,"geojson-dissolve":4,"jquery":8,"jquery-csv":7,"latinize":9,"leaflet":10,"underscore":84,"underscore.string":38}],2:[function(require,module,exports){
+},{"damerau-levenshtein":3,"geojson-dissolve":4,"jquery":8,"jquery-csv":7,"latinize":9,"leaflet":11,"leaflet-search":10,"underscore":85,"underscore.string":39}],2:[function(require,module,exports){
 /**
  * Callback for coordEach
  *
@@ -1070,7 +1089,7 @@ function dissolve () {
 }
 
 
-},{"@turf/meta":2,"geojson-flatten":5,"geojson-linestring-dissolve":6,"topojson-client":12,"topojson-server":13}],5:[function(require,module,exports){
+},{"@turf/meta":2,"geojson-flatten":5,"geojson-linestring-dissolve":6,"topojson-client":13,"topojson-server":14}],5:[function(require,module,exports){
 function flatten(gj) {
     switch ((gj && gj.type) || null) {
         case 'FeatureCollection':
@@ -13458,6 +13477,1020 @@ return jQuery;
 });
 
 },{}],10:[function(require,module,exports){
+/* 
+ * Leaflet Control Search v2.4.0 - 2018-03-13 
+ * 
+ * Copyright 2018 Stefano Cudini 
+ * stefano.cudini@gmail.com 
+ * http://labs.easyblog.it/ 
+ * 
+ * Licensed under the MIT license. 
+ * 
+ * Demo: 
+ * http://labs.easyblog.it/maps/leaflet-search/ 
+ * 
+ * Source: 
+ * git@github.com:stefanocudini/leaflet-search.git 
+ * 
+ */
+/*
+	Name					Data passed			   Description
+
+	Managed Events:
+	 search:locationfound	{latlng, title, layer} fired after moved and show markerLocation
+	 search:expanded		{}					   fired after control was expanded
+	 search:collapsed		{}					   fired after control was collapsed
+ 	 search:cancel			{}					   fired after cancel button clicked
+
+	Public methods:
+	 setLayer()				L.LayerGroup()         set layer search at runtime
+	 showAlert()            'Text message'         show alert message
+	 searchText()			'Text searched'        search text by external code
+*/
+
+//TODO implement can do research on multiple sources layers and remote		
+//TODO history: false,		//show latest searches in tooltip		
+//FIXME option condition problem {autoCollapse: true, markerLocation: true} not show location
+//FIXME option condition problem {autoCollapse: false }
+//
+//TODO here insert function  search inputText FIRST in _recordsCache keys and if not find results.. 
+//  run one of callbacks search(sourceData,jsonpUrl or options.layer) and run this.showTooltip
+//
+//TODO change structure of _recordsCache
+//	like this: _recordsCache = {"text-key1": {loc:[lat,lng], ..other attributes.. }, {"text-key2": {loc:[lat,lng]}...}, ...}
+//	in this mode every record can have a free structure of attributes, only 'loc' is required
+//TODO important optimization!!! always append data in this._recordsCache
+//  now _recordsCache content is emptied and replaced with new data founded
+//  always appending data on _recordsCache give the possibility of caching ajax, jsonp and layersearch!
+//
+//TODO here insert function  search inputText FIRST in _recordsCache keys and if not find results.. 
+//  run one of callbacks search(sourceData,jsonpUrl or options.layer) and run this.showTooltip
+//
+//TODO change structure of _recordsCache
+//	like this: _recordsCache = {"text-key1": {loc:[lat,lng], ..other attributes.. }, {"text-key2": {loc:[lat,lng]}...}, ...}
+//	in this way every record can have a free structure of attributes, only 'loc' is required
+
+(function (factory) {
+    if(typeof define === 'function' && define.amd) {
+    //AMD
+        define(['leaflet'], factory);
+    } else if(typeof module !== 'undefined') {
+    // Node/CommonJS
+        module.exports = factory(require('leaflet'));
+    } else {
+    // Browser globals
+        if(typeof window.L === 'undefined')
+            throw 'Leaflet must be loaded first';
+        factory(window.L);
+    }
+})(function (L) {
+
+
+L.Control.Search = L.Control.extend({
+	
+	includes: L.version[0]==='1' ? L.Evented.prototype : L.Mixin.Events,
+
+	options: {
+		url: '',						//url for search by ajax request, ex: "search.php?q={s}". Can be function to returns string for dynamic parameter setting
+		layer: null,					//layer where search markers(is a L.LayerGroup)				
+		sourceData: null,				//function to fill _recordsCache, passed searching text by first param and callback in second				
+		//TODO implements uniq option 'sourceData' to recognizes source type: url,array,callback or layer				
+		jsonpParam: null,				//jsonp param name for search by jsonp service, ex: "callback"
+		propertyLoc: 'loc',				//field for remapping location, using array: ['latname','lonname'] for select double fields(ex. ['lat','lon'] ) support dotted format: 'prop.subprop.title'
+		propertyName: 'title',			//property in marker.options(or feature.properties for vector layer) trough filter elements in layer,
+		formatData: null,				//callback for reformat all data from source to indexed data object
+		filterData: null,				//callback for filtering data from text searched, params: textSearch, allRecords
+		moveToLocation: null,			//callback run on location found, params: latlng, title, map
+		buildTip: null,					//function to return row tip html node(or html string), receive text tooltip in first param
+		container: '',					//container id to insert Search Control		
+		zoom: null,						//default zoom level for move to location
+		minLength: 1,					//minimal text length for autocomplete
+		initial: true,					//search elements only by initial text
+		casesensitive: false,			//search elements in case sensitive text
+		autoType: true,					//complete input with first suggested result and select this filled-in text.
+		delayType: 400,					//delay while typing for show tooltip
+		tooltipLimit: -1,				//limit max results to show in tooltip. -1 for no limit, 0 for no results
+		tipAutoSubmit: true,			//auto map panTo when click on tooltip
+		firstTipSubmit: false,			//auto select first result con enter click
+		autoResize: true,				//autoresize on input change
+		collapsed: true,				//collapse search control at startup
+		autoCollapse: false,			//collapse search control after submit(on button or on tips if enabled tipAutoSubmit)
+		autoCollapseTime: 1200,			//delay for autoclosing alert and collapse after blur
+		textErr: 'Location not found',	//error message
+		textCancel: 'Cancel',		    //title in cancel button		
+		textPlaceholder: 'Search...',   //placeholder value			
+		hideMarkerOnCollapse: false,    //remove circle and marker on search control collapsed		
+		position: 'topleft',		
+		marker: {						//custom L.Marker or false for hide
+			icon: false,				//custom L.Icon for maker location or false for hide
+			animate: true,				//animate a circle over location found
+			circle: {					//draw a circle in location found
+				radius: 10,
+				weight: 3,
+				color: '#e03',
+				stroke: true,
+				fill: false
+			}
+		}
+	},
+
+	_getPath: function(obj, prop) {
+		var parts = prop.split('.'),
+			last = parts.pop(),
+			len = parts.length,
+			cur = parts[0],
+			i = 1;
+
+		if(len > 0)
+			while((obj = obj[cur]) && i < len)
+				cur = parts[i++];
+
+		if(obj)
+			return obj[last];
+	},
+
+	_isObject: function(obj) {
+		return Object.prototype.toString.call(obj) === "[object Object]";
+	},
+
+	initialize: function(options) {
+		L.Util.setOptions(this, options || {});
+		this._inputMinSize = this.options.textPlaceholder ? this.options.textPlaceholder.length : 10;
+		this._layer = this.options.layer || new L.LayerGroup();
+		this._filterData = this.options.filterData || this._defaultFilterData;
+		this._formatData = this.options.formatData || this._defaultFormatData;
+		this._moveToLocation = this.options.moveToLocation || this._defaultMoveToLocation;
+		this._autoTypeTmp = this.options.autoType;	//useful for disable autoType temporarily in delete/backspace keydown
+		this._countertips = 0;		//number of tips items
+		this._recordsCache = {};	//key,value table! to store locations! format: key,latlng
+		this._curReq = null;
+	},
+
+	onAdd: function (map) {
+		this._map = map;
+		this._container = L.DomUtil.create('div', 'leaflet-control-search');
+		this._input = this._createInput(this.options.textPlaceholder, 'search-input');
+		this._tooltip = this._createTooltip('search-tooltip');
+		this._cancel = this._createCancel(this.options.textCancel, 'search-cancel');
+		this._button = this._createButton(this.options.textPlaceholder, 'search-button');
+		this._alert = this._createAlert('search-alert');
+
+		if(this.options.collapsed===false)
+			this.expand(this.options.collapsed);
+
+		if(this.options.marker) {
+			
+			if(this.options.marker instanceof L.Marker || this.options.marker instanceof L.CircleMarker)
+				this._markerSearch = this.options.marker;
+
+			else if(this._isObject(this.options.marker))
+				this._markerSearch = new L.Control.Search.Marker([0,0], this.options.marker);
+
+			this._markerSearch._isMarkerSearch = true;
+		}
+
+		this.setLayer( this._layer );
+
+		map.on({
+			// 		'layeradd': this._onLayerAddRemove,
+			// 		'layerremove': this._onLayerAddRemove
+			'resize': this._handleAutoresize
+			}, this);
+		return this._container;
+	},
+	addTo: function (map) {
+
+		if(this.options.container) {
+			this._container = this.onAdd(map);
+			this._wrapper = L.DomUtil.get(this.options.container);
+			this._wrapper.style.position = 'relative';
+			this._wrapper.appendChild(this._container);
+		}
+		else
+			L.Control.prototype.addTo.call(this, map);
+
+		return this;
+	},
+
+	onRemove: function(map) {
+		this._recordsCache = {};
+		// map.off({
+		// 		'layeradd': this._onLayerAddRemove,
+		// 		'layerremove': this._onLayerAddRemove
+		// 	}, this);
+	},
+
+	// _onLayerAddRemove: function(e) {
+	// 	//without this, run setLayer also for each Markers!! to optimize!
+	// 	if(e.layer instanceof L.LayerGroup)
+	// 		if( L.stamp(e.layer) != L.stamp(this._layer) )
+	// 			this.setLayer(e.layer);
+	// },
+
+	setLayer: function(layer) {	//set search layer at runtime
+		//this.options.layer = layer; //setting this, run only this._recordsFromLayer()
+		this._layer = layer;
+		this._layer.addTo(this._map);
+		return this;
+	},
+	
+	showAlert: function(text) {
+		var self = this;
+		text = text || this.options.textErr;
+		this._alert.style.display = 'block';
+		this._alert.innerHTML = text;
+		clearTimeout(this.timerAlert);
+		
+		this.timerAlert = setTimeout(function() {
+			self.hideAlert();
+		},this.options.autoCollapseTime);
+		return this;
+	},
+	
+	hideAlert: function() {
+		this._alert.style.display = 'none';
+		return this;
+	},
+		
+	cancel: function() {
+		this._input.value = '';
+		this._handleKeypress({ keyCode: 8 });//simulate backspace keypress
+		this._input.size = this._inputMinSize;
+		this._input.focus();
+		this._cancel.style.display = 'none';
+		this._hideTooltip();
+		this.fire('search:cancel');
+		return this;
+	},
+	
+	expand: function(toggle) {
+		toggle = typeof toggle === 'boolean' ? toggle : true;
+		this._input.style.display = 'block';
+		L.DomUtil.addClass(this._container, 'search-exp');
+		if ( toggle !== false ) {
+			this._input.focus();
+			this._map.on('dragstart click', this.collapse, this);
+		}
+		this.fire('search:expanded');
+		return this;	
+	},
+
+	collapse: function() {
+		this._hideTooltip();
+		this.cancel();
+		this._alert.style.display = 'none';
+		this._input.blur();
+		if(this.options.collapsed)
+		{
+			this._input.style.display = 'none';
+			this._cancel.style.display = 'none';			
+			L.DomUtil.removeClass(this._container, 'search-exp');		
+			if (this.options.hideMarkerOnCollapse) {
+				this._map.removeLayer(this._markerSearch);
+			}
+			this._map.off('dragstart click', this.collapse, this);
+		}
+		this.fire('search:collapsed');
+		return this;
+	},
+	
+	collapseDelayed: function() {	//collapse after delay, used on_input blur
+		var self = this;
+		if (!this.options.autoCollapse) return this;
+		clearTimeout(this.timerCollapse);
+		this.timerCollapse = setTimeout(function() {
+			self.collapse();
+		}, this.options.autoCollapseTime);
+		return this;		
+	},
+
+	collapseDelayedStop: function() {
+		clearTimeout(this.timerCollapse);
+		return this;		
+	},
+
+	////start DOM creations
+	_createAlert: function(className) {
+		var alert = L.DomUtil.create('div', className, this._container);
+		alert.style.display = 'none';
+
+		L.DomEvent
+			.on(alert, 'click', L.DomEvent.stop, this)
+			.on(alert, 'click', this.hideAlert, this);
+
+		return alert;
+	},
+
+	_createInput: function (text, className) {
+		var label = L.DomUtil.create('label', className, this._container);
+		var input = L.DomUtil.create('input', className, this._container);
+		input.type = 'text';
+		input.size = this._inputMinSize;
+		input.value = '';
+		input.autocomplete = 'off';
+		input.autocorrect = 'off';
+		input.autocapitalize = 'off';
+		input.placeholder = text;
+		input.style.display = 'none';
+		input.role = 'search';
+		input.id = input.role + input.type + input.size;
+		
+		label.htmlFor = input.id;
+		label.style.display = 'none';
+		label.value = text;
+
+		L.DomEvent
+			.disableClickPropagation(input)
+			.on(input, 'keyup', this._handleKeypress, this)
+			.on(input, 'blur', this.collapseDelayed, this)
+			.on(input, 'focus', this.collapseDelayedStop, this);
+		
+		return input;
+	},
+
+	_createCancel: function (title, className) {
+		var cancel = L.DomUtil.create('a', className, this._container);
+		cancel.href = '#';
+		cancel.title = title;
+		cancel.style.display = 'none';
+		cancel.innerHTML = "<span>&otimes;</span>";//imageless(see css)
+
+		L.DomEvent
+			.on(cancel, 'click', L.DomEvent.stop, this)
+			.on(cancel, 'click', this.cancel, this);
+
+		return cancel;
+	},
+	
+	_createButton: function (title, className) {
+		var button = L.DomUtil.create('a', className, this._container);
+		button.href = '#';
+		button.title = title;
+
+		L.DomEvent
+			.on(button, 'click', L.DomEvent.stop, this)
+			.on(button, 'click', this._handleSubmit, this)			
+			.on(button, 'focus', this.collapseDelayedStop, this)
+			.on(button, 'blur', this.collapseDelayed, this);
+
+		return button;
+	},
+
+	_createTooltip: function(className) {
+		var self = this;		
+		var tool = L.DomUtil.create('ul', className, this._container);
+		tool.style.display = 'none';
+		L.DomEvent
+			.disableClickPropagation(tool)
+			.on(tool, 'blur', this.collapseDelayed, this)
+			.on(tool, 'mousewheel', function(e) {
+				self.collapseDelayedStop();
+				L.DomEvent.stopPropagation(e);//disable zoom map
+			}, this)
+			.on(tool, 'mouseover', function(e) {
+				self.collapseDelayedStop();
+			}, this);
+		return tool;
+	},
+
+	_createTip: function(text, val) {//val is object in recordCache, usually is Latlng
+		var tip;
+		
+		if(this.options.buildTip)
+		{
+			tip = this.options.buildTip.call(this, text, val); //custom tip node or html string
+			if(typeof tip === 'string')
+			{
+				var tmpNode = L.DomUtil.create('div');
+				tmpNode.innerHTML = tip;
+				tip = tmpNode.firstChild;
+			}
+		}
+		else
+		{
+			tip = L.DomUtil.create('li', '');
+			tip.innerHTML = text;
+		}
+		
+		L.DomUtil.addClass(tip, 'search-tip');
+		tip._text = text; //value replaced in this._input and used by _autoType
+
+		if(this.options.tipAutoSubmit)
+			L.DomEvent
+				.disableClickPropagation(tip)		
+				.on(tip, 'click', L.DomEvent.stop, this)
+				.on(tip, 'click', function(e) {
+					this._input.value = text;
+					this._handleAutoresize();
+					this._input.focus();
+					this._hideTooltip();	
+					this._handleSubmit();
+				}, this);
+
+		return tip;
+	},
+
+	//////end DOM creations
+
+	_getUrl: function(text) {
+		return (typeof this.options.url === 'function') ? this.options.url(text) : this.options.url;
+	},
+
+	_defaultFilterData: function(text, records) {
+	
+		var I, icase, regSearch, frecords = {};
+
+		text = text.replace(/[.*+?^${}()|[\]\\]/g, '');  //sanitize remove all special characters
+		if(text==='')
+			return [];
+
+		I = this.options.initial ? '^' : '';  //search only initial text
+		icase = !this.options.casesensitive ? 'i' : undefined;
+
+		regSearch = new RegExp(I + text, icase);
+
+		//TODO use .filter or .map
+		for(var key in records) {
+			if( regSearch.test(key) )
+				frecords[key]= records[key];
+		}
+		
+		return frecords;
+	},
+
+	showTooltip: function(records) {
+		
+
+		this._countertips = 0;
+		this._tooltip.innerHTML = '';
+		this._tooltip.currentSelection = -1;  //inizialized for _handleArrowSelect()
+
+		if(this.options.tooltipLimit)
+		{
+			for(var key in records)//fill tooltip
+			{
+				if(this._countertips === this.options.tooltipLimit)
+					break;
+				
+				this._countertips++;
+
+				this._tooltip.appendChild( this._createTip(key, records[key]) );
+			}
+		}
+		
+		if(this._countertips > 0)
+		{
+			this._tooltip.style.display = 'block';
+			
+			if(this._autoTypeTmp)
+				this._autoType();
+
+			this._autoTypeTmp = this.options.autoType;//reset default value
+		}
+		else
+			this._hideTooltip();
+
+		this._tooltip.scrollTop = 0;
+
+		return this._countertips;
+	},
+
+	_hideTooltip: function() {
+		this._tooltip.style.display = 'none';
+		this._tooltip.innerHTML = '';
+		return 0;
+	},
+
+	_defaultFormatData: function(json) {	//default callback for format data to indexed data
+		var self = this,
+			propName = this.options.propertyName,
+			propLoc = this.options.propertyLoc,
+			i, jsonret = {};
+
+		if( L.Util.isArray(propLoc) )
+			for(i in json)
+				jsonret[ self._getPath(json[i],propName) ]= L.latLng( json[i][ propLoc[0] ], json[i][ propLoc[1] ] );
+		else
+			for(i in json)
+				jsonret[ self._getPath(json[i],propName) ]= L.latLng( self._getPath(json[i],propLoc) );
+		//TODO throw new Error("propertyName '"+propName+"' not found in JSON data");
+		return jsonret;
+	},
+
+	_recordsFromJsonp: function(text, callAfter) {  //extract searched records from remote jsonp service
+		L.Control.Search.callJsonp = callAfter;
+		var script = L.DomUtil.create('script','leaflet-search-jsonp', document.getElementsByTagName('body')[0] ),			
+			url = L.Util.template(this._getUrl(text)+'&'+this.options.jsonpParam+'=L.Control.Search.callJsonp', {s: text}); //parsing url
+			//rnd = '&_='+Math.floor(Math.random()*10000);
+			//TODO add rnd param or randomize callback name! in recordsFromJsonp
+		script.type = 'text/javascript';
+		script.src = url;
+		return { abort: function() { script.parentNode.removeChild(script); } };
+	},
+
+	_recordsFromAjax: function(text, callAfter) {	//Ajax request
+		if (window.XMLHttpRequest === undefined) {
+			window.XMLHttpRequest = function() {
+				try { return new ActiveXObject("Microsoft.XMLHTTP.6.0"); }
+				catch  (e1) {
+					try { return new ActiveXObject("Microsoft.XMLHTTP.3.0"); }
+					catch (e2) { throw new Error("XMLHttpRequest is not supported"); }
+				}
+			};
+		}
+		var IE8or9 = ( L.Browser.ie && !window.atob && document.querySelector ),
+			request = IE8or9 ? new XDomainRequest() : new XMLHttpRequest(),
+			url = L.Util.template(this._getUrl(text), {s: text});
+
+		//rnd = '&_='+Math.floor(Math.random()*10000);
+		//TODO add rnd param or randomize callback name! in recordsFromAjax			
+		
+		request.open("GET", url);
+		
+
+		request.onload = function() {
+			callAfter( JSON.parse(request.responseText) );
+		};
+		request.onreadystatechange = function() {
+		    if(request.readyState === 4 && request.status === 200) {
+		    	this.onload();
+		    }
+		};
+
+		request.send();
+		return request;   
+	},
+
+  _searchInLayer: function(layer, retRecords, propName) {
+    var self = this, loc;
+
+    if(layer instanceof L.Control.Search.Marker) return;
+
+    if(layer instanceof L.Marker || layer instanceof L.CircleMarker)
+    {
+      if(self._getPath(layer.options,propName))
+      {
+        loc = layer.getLatLng();
+        loc.layer = layer;
+        retRecords[ self._getPath(layer.options,propName) ] = loc;
+      }
+      else if(self._getPath(layer.feature.properties,propName))
+      {
+        loc = layer.getLatLng();
+        loc.layer = layer;
+        retRecords[ self._getPath(layer.feature.properties,propName) ] = loc;
+      }
+      else {
+        //throw new Error("propertyName '"+propName+"' not found in marker"); 
+         
+      }
+    }
+    if(layer instanceof L.Path || layer instanceof L.Polyline || layer instanceof L.Polygon)
+    {
+      if(self._getPath(layer.options,propName))
+      {
+        loc = layer.getBounds().getCenter();
+        loc.layer = layer;
+        retRecords[ self._getPath(layer.options,propName) ] = loc;
+      }
+      else if(self._getPath(layer.feature.properties,propName))
+      {
+        loc = layer.getBounds().getCenter();
+        loc.layer = layer;
+        retRecords[ self._getPath(layer.feature.properties,propName) ] = loc;
+      }
+      else {
+        //throw new Error("propertyName '"+propName+"' not found in shape"); 
+         
+      }
+    }
+    else if(layer.hasOwnProperty('feature'))//GeoJSON
+    {
+      if(layer.feature.properties.hasOwnProperty(propName))
+      {
+        if(layer.getLatLng && typeof layer.getLatLng === 'function') {
+          loc = layer.getLatLng();
+          loc.layer = layer;			
+          retRecords[ layer.feature.properties[propName] ] = loc;
+        } else if(layer.getBounds && typeof layer.getBounds === 'function') {
+          loc = layer.getBounds().getCenter();
+          loc.layer = layer;			
+          retRecords[ layer.feature.properties[propName] ] = loc;
+        } else {
+          
+        }
+      }
+      else {
+        //throw new Error("propertyName '"+propName+"' not found in feature");
+         
+      }
+    }
+    else if(layer instanceof L.LayerGroup)
+    {
+      layer.eachLayer(function (layer) {
+        self._searchInLayer(layer, retRecords, propName);
+      });
+    }
+  },
+	
+	_recordsFromLayer: function() {	//return table: key,value from layer
+		var self = this,
+			retRecords = {},
+			propName = this.options.propertyName;
+		
+		this._layer.eachLayer(function (layer) {
+			self._searchInLayer(layer, retRecords, propName);
+		});
+		
+		return retRecords;
+	},
+	
+	_autoType: function() {
+		
+		//TODO implements autype without selection(useful for mobile device)
+		
+		var start = this._input.value.length,
+			firstRecord = this._tooltip.firstChild ? this._tooltip.firstChild._text : '',
+			end = firstRecord.length;
+
+		if (firstRecord.indexOf(this._input.value) === 0) { // If prefix match
+			this._input.value = firstRecord;
+			this._handleAutoresize();
+
+			if (this._input.createTextRange) {
+				var selRange = this._input.createTextRange();
+				selRange.collapse(true);
+				selRange.moveStart('character', start);
+				selRange.moveEnd('character', end);
+				selRange.select();
+			}
+			else if(this._input.setSelectionRange) {
+				this._input.setSelectionRange(start, end);
+			}
+			else if(this._input.selectionStart) {
+				this._input.selectionStart = start;
+				this._input.selectionEnd = end;
+			}
+		}
+	},
+
+	_hideAutoType: function() {	// deselect text:
+
+		var sel;
+		if ((sel = this._input.selection) && sel.empty) {
+			sel.empty();
+		}
+		else if (this._input.createTextRange) {
+			sel = this._input.createTextRange();
+			sel.collapse(true);
+			var end = this._input.value.length;
+			sel.moveStart('character', end);
+			sel.moveEnd('character', end);
+			sel.select();
+		}
+		else {
+			if (this._input.getSelection) {
+				this._input.getSelection().removeAllRanges();
+			}
+			this._input.selectionStart = this._input.selectionEnd;
+		}
+	},
+	
+	_handleKeypress: function (e) {	//run _input keyup event
+		var self = this;
+
+		switch(e.keyCode)
+		{
+			case 27://Esc
+				this.collapse();
+			break;
+			case 13://Enter
+				if(this._countertips == 1 || (this.options.firstTipSubmit && this._countertips > 0))
+          if(this._tooltip.currentSelection == -1)
+					  this._handleArrowSelect(1);
+				this._handleSubmit();	//do search
+			break;
+			case 38://Up
+				this._handleArrowSelect(-1);
+			break;
+			case 40://Down
+				this._handleArrowSelect(1);
+			break;
+			case  8://Backspace
+			case 45://Insert
+			case 46://Delete
+				this._autoTypeTmp = false;//disable temporarily autoType
+			break;
+			case 37://Left
+			case 39://Right
+			case 16://Shift
+			case 17://Ctrl
+			case 35://End
+			case 36://Home
+			break;
+			default://All keys
+
+				if(this._input.value.length)
+					this._cancel.style.display = 'block';
+				else
+					this._cancel.style.display = 'none';
+
+				if(this._input.value.length >= this.options.minLength)
+				{
+					clearTimeout(this.timerKeypress);	//cancel last search request while type in				
+					this.timerKeypress = setTimeout(function() {	//delay before request, for limit jsonp/ajax request
+
+						self._fillRecordsCache();
+					
+					}, this.options.delayType);
+				}
+				else
+					this._hideTooltip();
+		}
+
+		this._handleAutoresize();
+	},
+
+	searchText: function(text) {
+		var code = text.charCodeAt(text.length);
+
+		this._input.value = text;
+
+		this._input.style.display = 'block';
+		L.DomUtil.addClass(this._container, 'search-exp');
+
+		this._autoTypeTmp = false;
+
+		this._handleKeypress({keyCode: code});
+	},
+	
+	_fillRecordsCache: function() {
+
+		var self = this,
+			inputText = this._input.value, records;
+
+		if(this._curReq && this._curReq.abort)
+			this._curReq.abort();
+		//abort previous requests
+
+		L.DomUtil.addClass(this._container, 'search-load');	
+
+		if(this.options.layer)
+		{
+			//TODO _recordsFromLayer must return array of objects, formatted from _formatData
+			this._recordsCache = this._recordsFromLayer();
+			
+			records = this._filterData( this._input.value, this._recordsCache );
+
+			this.showTooltip( records );
+
+			L.DomUtil.removeClass(this._container, 'search-load');
+		}
+		else
+		{
+			if(this.options.sourceData)
+				this._retrieveData = this.options.sourceData;
+
+			else if(this.options.url)	//jsonp or ajax
+				this._retrieveData = this.options.jsonpParam ? this._recordsFromJsonp : this._recordsFromAjax;
+
+			this._curReq = this._retrieveData.call(this, inputText, function(data) {
+				
+				self._recordsCache = self._formatData.call(self, data);
+
+				//TODO refact!
+				if(self.options.sourceData)
+					records = self._filterData( self._input.value, self._recordsCache );
+				else
+					records = self._recordsCache;
+
+				self.showTooltip( records );
+ 
+				L.DomUtil.removeClass(self._container, 'search-load');
+			});
+		}
+	},
+	
+	_handleAutoresize: function() {	//autoresize this._input
+	    //TODO refact _handleAutoresize now is not accurate
+	    if (this._input.style.maxWidth != this._map._container.offsetWidth) //If maxWidth isn't the same as when first set, reset to current Map width
+	        this._input.style.maxWidth = L.DomUtil.getStyle(this._map._container, 'width');
+
+		if(this.options.autoResize && (this._container.offsetWidth + 45 < this._map._container.offsetWidth))
+			this._input.size = this._input.value.length<this._inputMinSize ? this._inputMinSize : this._input.value.length;
+	},
+
+	_handleArrowSelect: function(velocity) {
+	
+		var searchTips = this._tooltip.hasChildNodes() ? this._tooltip.childNodes : [];
+			
+		for (i=0; i<searchTips.length; i++)
+			L.DomUtil.removeClass(searchTips[i], 'search-tip-select');
+		
+		if ((velocity == 1 ) && (this._tooltip.currentSelection >= (searchTips.length - 1))) {// If at end of list.
+			L.DomUtil.addClass(searchTips[this._tooltip.currentSelection], 'search-tip-select');
+		}
+		else if ((velocity == -1 ) && (this._tooltip.currentSelection <= 0)) { // Going back up to the search box.
+			this._tooltip.currentSelection = -1;
+		}
+		else if (this._tooltip.style.display != 'none') {
+			this._tooltip.currentSelection += velocity;
+			
+			L.DomUtil.addClass(searchTips[this._tooltip.currentSelection], 'search-tip-select');
+			
+			this._input.value = searchTips[this._tooltip.currentSelection]._text;
+
+			// scroll:
+			var tipOffsetTop = searchTips[this._tooltip.currentSelection].offsetTop;
+			
+			if (tipOffsetTop + searchTips[this._tooltip.currentSelection].clientHeight >= this._tooltip.scrollTop + this._tooltip.clientHeight) {
+				this._tooltip.scrollTop = tipOffsetTop - this._tooltip.clientHeight + searchTips[this._tooltip.currentSelection].clientHeight;
+			}
+			else if (tipOffsetTop <= this._tooltip.scrollTop) {
+				this._tooltip.scrollTop = tipOffsetTop;
+			}
+		}
+	},
+
+	_handleSubmit: function() {	//button and tooltip click and enter submit
+
+		this._hideAutoType();
+		
+		this.hideAlert();
+		this._hideTooltip();
+
+		if(this._input.style.display == 'none')	//on first click show _input only
+			this.expand();
+		else
+		{
+			if(this._input.value === '')	//hide _input only
+				this.collapse();
+			else
+			{
+				var loc = this._getLocation(this._input.value);
+				
+				if(loc===false)
+					this.showAlert();
+				else
+				{
+					this.showLocation(loc, this._input.value);
+					this.fire('search:locationfound', {
+							latlng: loc,
+							text: this._input.value,
+							layer: loc.layer ? loc.layer : null
+						});
+				}
+			}
+		}
+	},
+
+	_getLocation: function(key) {	//extract latlng from _recordsCache
+
+		if( this._recordsCache.hasOwnProperty(key) )
+			return this._recordsCache[key];//then after use .loc attribute
+		else
+			return false;
+	},
+
+	_defaultMoveToLocation: function(latlng, title, map) {
+		if(this.options.zoom)
+ 			this._map.setView(latlng, this.options.zoom);
+ 		else
+			this._map.panTo(latlng);
+	},
+
+	showLocation: function(latlng, title) {	//set location on map from _recordsCache
+		var self = this;
+
+		self._map.once('moveend zoomend', function(e) {
+
+			if(self._markerSearch) {
+				self._markerSearch.addTo(self._map).setLatLng(latlng);
+			}
+			
+		});
+
+		self._moveToLocation(latlng, title, self._map);
+		//FIXME autoCollapse option hide self._markerSearch before visualized!!
+		if(self.options.autoCollapse)
+			self.collapse();
+
+		return self;
+	}
+});
+
+L.Control.Search.Marker = L.Marker.extend({
+
+	includes: L.version[0]==='1' ? L.Evented.prototype : L.Mixin.Events,
+	
+	options: {
+		icon: new L.Icon.Default(),
+		animate: true,
+		circle: {
+			radius: 10,
+			weight: 3,
+			color: '#e03',
+			stroke: true,
+			fill: false
+		}
+	},
+	
+	initialize: function (latlng, options) {
+		L.setOptions(this, options);
+
+		if(options.icon === true)
+			options.icon = new L.Icon.Default();
+
+		L.Marker.prototype.initialize.call(this, latlng, options);
+		
+		if( L.Control.Search.prototype._isObject(this.options.circle) )
+			this._circleLoc = new L.CircleMarker(latlng, this.options.circle);
+	},
+
+	onAdd: function (map) {
+		L.Marker.prototype.onAdd.call(this, map);
+		if(this._circleLoc) {
+			map.addLayer(this._circleLoc);
+			if(this.options.animate)
+				this.animate();
+		}
+	},
+
+	onRemove: function (map) {
+		L.Marker.prototype.onRemove.call(this, map);
+		if(this._circleLoc)
+			map.removeLayer(this._circleLoc);
+	},
+	
+	setLatLng: function (latlng) {
+		L.Marker.prototype.setLatLng.call(this, latlng);
+		if(this._circleLoc)
+			this._circleLoc.setLatLng(latlng);
+		return this;
+	},
+	
+	_initIcon: function () {
+		if(this.options.icon)
+			L.Marker.prototype._initIcon.call(this);
+	},
+
+	_removeIcon: function () {
+		if(this.options.icon)
+			L.Marker.prototype._removeIcon.call(this);
+	},
+
+	animate: function() {
+	//TODO refact animate() more smooth! like this: http://goo.gl/DDlRs
+		if(this._circleLoc)
+		{
+			var circle = this._circleLoc,
+				tInt = 200,	//time interval
+				ss = 5,	//frames
+				mr = parseInt(circle._radius/ss),
+				oldrad = this.options.circle.radius,
+				newrad = circle._radius * 2,
+				acc = 0;
+
+			circle._timerAnimLoc = setInterval(function() {
+				acc += 0.5;
+				mr += acc;	//adding acceleration
+				newrad -= mr;
+				
+				circle.setRadius(newrad);
+
+				if(newrad<oldrad)
+				{
+					clearInterval(circle._timerAnimLoc);
+					circle.setRadius(oldrad);//reset radius
+					//if(typeof afterAnimCall == 'function')
+						//afterAnimCall();
+						//TODO use create event 'animateEnd' in L.Control.Search.Marker 
+				}
+			}, tInt);
+		}
+		
+		return this;
+	}
+});
+
+L.Map.addInitHook(function () {
+    if (this.options.searchControl) {
+        this.searchControl = L.control.search(this.options.searchControl);
+        this.addControl(this.searchControl);
+    }
+});
+
+L.control.search = function (options) {
+    return new L.Control.Search(options);
+};
+
+return L.Control.Search;
+
+});
+
+
+
+},{"leaflet":11}],11:[function(require,module,exports){
 /* @preserve
  * Leaflet 1.3.1, a JS library for interactive maps. http://leafletjs.com
  * (c) 2010-2017 Vladimir Agafonkin, (c) 2010-2011 CloudMade
@@ -27261,7 +28294,7 @@ exports.map = createMap;
 })));
 
 
-},{}],11:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 /* global window, exports, define */
 
 !function() {
@@ -27481,7 +28514,7 @@ exports.map = createMap;
     /* eslint-enable quote-props */
 }()
 
-},{}],12:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 // https://github.com/topojson/topojson-client Version 3.0.0. Copyright 2017 Mike Bostock.
 (function (global, factory) {
 	typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
@@ -27988,7 +29021,7 @@ Object.defineProperty(exports, '__esModule', { value: true });
 
 })));
 
-},{}],13:[function(require,module,exports){
+},{}],14:[function(require,module,exports){
 // https://github.com/topojson/topojson-server Version 3.0.0. Copyright 2017 Mike Bostock.
 (function (global, factory) {
 	typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
@@ -28826,7 +29859,7 @@ Object.defineProperty(exports, '__esModule', { value: true });
 
 })));
 
-},{}],14:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 var trim = require('./trim');
 var decap = require('./decapitalize');
 
@@ -28842,7 +29875,7 @@ module.exports = function camelize(str, decapitalize) {
   }
 };
 
-},{"./decapitalize":23,"./trim":76}],15:[function(require,module,exports){
+},{"./decapitalize":24,"./trim":77}],16:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function capitalize(str, lowercaseRest) {
@@ -28852,14 +29885,14 @@ module.exports = function capitalize(str, lowercaseRest) {
   return str.charAt(0).toUpperCase() + remainingChars;
 };
 
-},{"./helper/makeString":33}],16:[function(require,module,exports){
+},{"./helper/makeString":34}],17:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function chars(str) {
   return makeString(str).split('');
 };
 
-},{"./helper/makeString":33}],17:[function(require,module,exports){
+},{"./helper/makeString":34}],18:[function(require,module,exports){
 module.exports = function chop(str, step) {
   if (str == null) return [];
   str = String(str);
@@ -28867,7 +29900,7 @@ module.exports = function chop(str, step) {
   return step > 0 ? str.match(new RegExp('.{1,' + step + '}', 'g')) : [str];
 };
 
-},{}],18:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 var capitalize = require('./capitalize');
 var camelize = require('./camelize');
 var makeString = require('./helper/makeString');
@@ -28877,14 +29910,14 @@ module.exports = function classify(str) {
   return capitalize(camelize(str.replace(/[\W_]/g, ' ')).replace(/\s/g, ''));
 };
 
-},{"./camelize":14,"./capitalize":15,"./helper/makeString":33}],19:[function(require,module,exports){
+},{"./camelize":15,"./capitalize":16,"./helper/makeString":34}],20:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function clean(str) {
   return trim(str).replace(/\s\s+/g, ' ');
 };
 
-},{"./trim":76}],20:[function(require,module,exports){
+},{"./trim":77}],21:[function(require,module,exports){
 
 var makeString = require('./helper/makeString');
 
@@ -28908,7 +29941,7 @@ module.exports = function cleanDiacritics(str) {
   });
 };
 
-},{"./helper/makeString":33}],21:[function(require,module,exports){
+},{"./helper/makeString":34}],22:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function(str, substr) {
@@ -28920,14 +29953,14 @@ module.exports = function(str, substr) {
   return str.split(substr).length - 1;
 };
 
-},{"./helper/makeString":33}],22:[function(require,module,exports){
+},{"./helper/makeString":34}],23:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function dasherize(str) {
   return trim(str).replace(/([A-Z])/g, '-$1').replace(/[-_\s]+/g, '-').toLowerCase();
 };
 
-},{"./trim":76}],23:[function(require,module,exports){
+},{"./trim":77}],24:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function decapitalize(str) {
@@ -28935,7 +29968,7 @@ module.exports = function decapitalize(str) {
   return str.charAt(0).toLowerCase() + str.slice(1);
 };
 
-},{"./helper/makeString":33}],24:[function(require,module,exports){
+},{"./helper/makeString":34}],25:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 function getIndent(str) {
@@ -28965,7 +29998,7 @@ module.exports = function dedent(str, pattern) {
   return str.replace(reg, '');
 };
 
-},{"./helper/makeString":33}],25:[function(require,module,exports){
+},{"./helper/makeString":34}],26:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var toPositive = require('./helper/toPositive');
 
@@ -28980,7 +30013,7 @@ module.exports = function endsWith(str, ends, position) {
   return position >= 0 && str.indexOf(ends, position) === position;
 };
 
-},{"./helper/makeString":33,"./helper/toPositive":35}],26:[function(require,module,exports){
+},{"./helper/makeString":34,"./helper/toPositive":36}],27:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var escapeChars = require('./helper/escapeChars');
 
@@ -28999,7 +30032,7 @@ module.exports = function escapeHTML(str) {
   });
 };
 
-},{"./helper/escapeChars":30,"./helper/makeString":33}],27:[function(require,module,exports){
+},{"./helper/escapeChars":31,"./helper/makeString":34}],28:[function(require,module,exports){
 module.exports = function() {
   var result = {};
 
@@ -29011,7 +30044,7 @@ module.exports = function() {
   return result;
 };
 
-},{}],28:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 var makeString = require('./makeString');
 
 module.exports = function adjacent(str, direction) {
@@ -29022,7 +30055,7 @@ module.exports = function adjacent(str, direction) {
   return str.slice(0, -1) + String.fromCharCode(str.charCodeAt(str.length - 1) + direction);
 };
 
-},{"./makeString":33}],29:[function(require,module,exports){
+},{"./makeString":34}],30:[function(require,module,exports){
 var escapeRegExp = require('./escapeRegExp');
 
 module.exports = function defaultToWhiteSpace(characters) {
@@ -29034,7 +30067,7 @@ module.exports = function defaultToWhiteSpace(characters) {
     return '[' + escapeRegExp(characters) + ']';
 };
 
-},{"./escapeRegExp":31}],30:[function(require,module,exports){
+},{"./escapeRegExp":32}],31:[function(require,module,exports){
 /* We're explicitly defining the list of entities we want to escape.
 nbsp is an HTML entity, but we don't want to escape all space characters in a string, hence its omission in this map.
 
@@ -29055,14 +30088,14 @@ var escapeChars = {
 
 module.exports = escapeChars;
 
-},{}],31:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 var makeString = require('./makeString');
 
 module.exports = function escapeRegExp(str) {
   return makeString(str).replace(/([.*+?^=!:${}()|[\]\/\\])/g, '\\$1');
 };
 
-},{"./makeString":33}],32:[function(require,module,exports){
+},{"./makeString":34}],33:[function(require,module,exports){
 /*
 We're explicitly defining the list of entities that might see in escape HTML strings
 */
@@ -29083,7 +30116,7 @@ var htmlEntities = {
 
 module.exports = htmlEntities;
 
-},{}],33:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 /**
  * Ensure some object is a coerced to a string
  **/
@@ -29092,7 +30125,7 @@ module.exports = function makeString(object) {
   return '' + object;
 };
 
-},{}],34:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 module.exports = function strRepeat(str, qty){
   if (qty < 1) return '';
   var result = '';
@@ -29103,12 +30136,12 @@ module.exports = function strRepeat(str, qty){
   return result;
 };
 
-},{}],35:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 module.exports = function toPositive(number) {
   return number < 0 ? 0 : (+number || 0);
 };
 
-},{}],36:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 var capitalize = require('./capitalize');
 var underscored = require('./underscored');
 var trim = require('./trim');
@@ -29117,7 +30150,7 @@ module.exports = function humanize(str) {
   return capitalize(trim(underscored(str).replace(/_id$/, '').replace(/_/g, ' ')));
 };
 
-},{"./capitalize":15,"./trim":76,"./underscored":78}],37:[function(require,module,exports){
+},{"./capitalize":16,"./trim":77,"./underscored":79}],38:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function include(str, needle) {
@@ -29125,7 +30158,7 @@ module.exports = function include(str, needle) {
   return makeString(str).indexOf(needle) !== -1;
 };
 
-},{"./helper/makeString":33}],38:[function(require,module,exports){
+},{"./helper/makeString":34}],39:[function(require,module,exports){
 /*
 * Underscore.string
 * (c) 2010 Esa-Matti Suuronen <esa-matti aet suuronen dot org>
@@ -29270,21 +30303,21 @@ for (var method in prototypeMethods) prototype2method(prototypeMethods[method]);
 
 module.exports = s;
 
-},{"./camelize":14,"./capitalize":15,"./chars":16,"./chop":17,"./classify":18,"./clean":19,"./cleanDiacritics":20,"./count":21,"./dasherize":22,"./decapitalize":23,"./dedent":24,"./endsWith":25,"./escapeHTML":26,"./exports":27,"./helper/escapeRegExp":31,"./humanize":36,"./include":37,"./insert":39,"./isBlank":40,"./join":41,"./levenshtein":42,"./lines":43,"./lpad":44,"./lrpad":45,"./ltrim":46,"./map":47,"./naturalCmp":48,"./numberFormat":49,"./pad":50,"./pred":51,"./prune":52,"./quote":53,"./repeat":54,"./replaceAll":55,"./reverse":56,"./rpad":57,"./rtrim":58,"./slugify":59,"./splice":60,"./sprintf":61,"./startsWith":62,"./strLeft":63,"./strLeftBack":64,"./strRight":65,"./strRightBack":66,"./stripTags":67,"./succ":68,"./surround":69,"./swapCase":70,"./titleize":71,"./toBoolean":72,"./toNumber":73,"./toSentence":74,"./toSentenceSerial":75,"./trim":76,"./truncate":77,"./underscored":78,"./unescapeHTML":79,"./unquote":80,"./vsprintf":81,"./words":82,"./wrap":83}],39:[function(require,module,exports){
+},{"./camelize":15,"./capitalize":16,"./chars":17,"./chop":18,"./classify":19,"./clean":20,"./cleanDiacritics":21,"./count":22,"./dasherize":23,"./decapitalize":24,"./dedent":25,"./endsWith":26,"./escapeHTML":27,"./exports":28,"./helper/escapeRegExp":32,"./humanize":37,"./include":38,"./insert":40,"./isBlank":41,"./join":42,"./levenshtein":43,"./lines":44,"./lpad":45,"./lrpad":46,"./ltrim":47,"./map":48,"./naturalCmp":49,"./numberFormat":50,"./pad":51,"./pred":52,"./prune":53,"./quote":54,"./repeat":55,"./replaceAll":56,"./reverse":57,"./rpad":58,"./rtrim":59,"./slugify":60,"./splice":61,"./sprintf":62,"./startsWith":63,"./strLeft":64,"./strLeftBack":65,"./strRight":66,"./strRightBack":67,"./stripTags":68,"./succ":69,"./surround":70,"./swapCase":71,"./titleize":72,"./toBoolean":73,"./toNumber":74,"./toSentence":75,"./toSentenceSerial":76,"./trim":77,"./truncate":78,"./underscored":79,"./unescapeHTML":80,"./unquote":81,"./vsprintf":82,"./words":83,"./wrap":84}],40:[function(require,module,exports){
 var splice = require('./splice');
 
 module.exports = function insert(str, i, substr) {
   return splice(str, i, 0, substr);
 };
 
-},{"./splice":60}],40:[function(require,module,exports){
+},{"./splice":61}],41:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function isBlank(str) {
   return (/^\s*$/).test(makeString(str));
 };
 
-},{"./helper/makeString":33}],41:[function(require,module,exports){
+},{"./helper/makeString":34}],42:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var slice = [].slice;
 
@@ -29295,7 +30328,7 @@ module.exports = function join() {
   return args.join(makeString(separator));
 };
 
-},{"./helper/makeString":33}],42:[function(require,module,exports){
+},{"./helper/makeString":34}],43:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 /**
@@ -29349,27 +30382,27 @@ module.exports = function levenshtein(str1, str2) {
   return nextCol;
 };
 
-},{"./helper/makeString":33}],43:[function(require,module,exports){
+},{"./helper/makeString":34}],44:[function(require,module,exports){
 module.exports = function lines(str) {
   if (str == null) return [];
   return String(str).split(/\r\n?|\n/);
 };
 
-},{}],44:[function(require,module,exports){
+},{}],45:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function lpad(str, length, padStr) {
   return pad(str, length, padStr);
 };
 
-},{"./pad":50}],45:[function(require,module,exports){
+},{"./pad":51}],46:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function lrpad(str, length, padStr) {
   return pad(str, length, padStr, 'both');
 };
 
-},{"./pad":50}],46:[function(require,module,exports){
+},{"./pad":51}],47:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrimLeft = String.prototype.trimLeft;
@@ -29381,7 +30414,7 @@ module.exports = function ltrim(str, characters) {
   return str.replace(new RegExp('^' + characters + '+'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":29,"./helper/makeString":33}],47:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":30,"./helper/makeString":34}],48:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function(str, callback) {
@@ -29392,7 +30425,7 @@ module.exports = function(str, callback) {
   return str.replace(/./g, callback);
 };
 
-},{"./helper/makeString":33}],48:[function(require,module,exports){
+},{"./helper/makeString":34}],49:[function(require,module,exports){
 module.exports = function naturalCmp(str1, str2) {
   if (str1 == str2) return 0;
   if (!str1) return -1;
@@ -29423,7 +30456,7 @@ module.exports = function naturalCmp(str1, str2) {
   return str1 < str2 ? -1 : 1;
 };
 
-},{}],49:[function(require,module,exports){
+},{}],50:[function(require,module,exports){
 module.exports = function numberFormat(number, dec, dsep, tsep) {
   if (isNaN(number) || number == null) return '';
 
@@ -29437,7 +30470,7 @@ module.exports = function numberFormat(number, dec, dsep, tsep) {
   return fnums.replace(/(\d)(?=(?:\d{3})+$)/g, '$1' + tsep) + decimals;
 };
 
-},{}],50:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var strRepeat = require('./helper/strRepeat');
 
@@ -29465,14 +30498,14 @@ module.exports = function pad(str, length, padStr, type) {
   }
 };
 
-},{"./helper/makeString":33,"./helper/strRepeat":34}],51:[function(require,module,exports){
+},{"./helper/makeString":34,"./helper/strRepeat":35}],52:[function(require,module,exports){
 var adjacent = require('./helper/adjacent');
 
 module.exports = function succ(str) {
   return adjacent(str, -1);
 };
 
-},{"./helper/adjacent":28}],52:[function(require,module,exports){
+},{"./helper/adjacent":29}],53:[function(require,module,exports){
 /**
  * _s.prune: a more elegant version of truncate
  * prune extra chars, never leaving a half-chopped word.
@@ -29501,14 +30534,14 @@ module.exports = function prune(str, length, pruneStr) {
   return (template + pruneStr).length > str.length ? str : str.slice(0, template.length) + pruneStr;
 };
 
-},{"./helper/makeString":33,"./rtrim":58}],53:[function(require,module,exports){
+},{"./helper/makeString":34,"./rtrim":59}],54:[function(require,module,exports){
 var surround = require('./surround');
 
 module.exports = function quote(str, quoteChar) {
   return surround(str, quoteChar || '"');
 };
 
-},{"./surround":69}],54:[function(require,module,exports){
+},{"./surround":70}],55:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var strRepeat = require('./helper/strRepeat');
 
@@ -29526,7 +30559,7 @@ module.exports = function repeat(str, qty, separator) {
   return repeat.join(separator);
 };
 
-},{"./helper/makeString":33,"./helper/strRepeat":34}],55:[function(require,module,exports){
+},{"./helper/makeString":34,"./helper/strRepeat":35}],56:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function replaceAll(str, find, replace, ignorecase) {
@@ -29536,21 +30569,21 @@ module.exports = function replaceAll(str, find, replace, ignorecase) {
   return makeString(str).replace(reg, replace);
 };
 
-},{"./helper/makeString":33}],56:[function(require,module,exports){
+},{"./helper/makeString":34}],57:[function(require,module,exports){
 var chars = require('./chars');
 
 module.exports = function reverse(str) {
   return chars(str).reverse().join('');
 };
 
-},{"./chars":16}],57:[function(require,module,exports){
+},{"./chars":17}],58:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function rpad(str, length, padStr) {
   return pad(str, length, padStr, 'right');
 };
 
-},{"./pad":50}],58:[function(require,module,exports){
+},{"./pad":51}],59:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrimRight = String.prototype.trimRight;
@@ -29562,7 +30595,7 @@ module.exports = function rtrim(str, characters) {
   return str.replace(new RegExp(characters + '+$'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":29,"./helper/makeString":33}],59:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":30,"./helper/makeString":34}],60:[function(require,module,exports){
 var trim = require('./trim');
 var dasherize = require('./dasherize');
 var cleanDiacritics = require('./cleanDiacritics');
@@ -29571,7 +30604,7 @@ module.exports = function slugify(str) {
   return trim(dasherize(cleanDiacritics(str).replace(/[^\w\s-]/g, '-').toLowerCase()), '-');
 };
 
-},{"./cleanDiacritics":20,"./dasherize":22,"./trim":76}],60:[function(require,module,exports){
+},{"./cleanDiacritics":21,"./dasherize":23,"./trim":77}],61:[function(require,module,exports){
 var chars = require('./chars');
 
 module.exports = function splice(str, i, howmany, substr) {
@@ -29580,13 +30613,13 @@ module.exports = function splice(str, i, howmany, substr) {
   return arr.join('');
 };
 
-},{"./chars":16}],61:[function(require,module,exports){
+},{"./chars":17}],62:[function(require,module,exports){
 var deprecate = require('util-deprecate');
 
 module.exports = deprecate(require('sprintf-js').sprintf,
   'sprintf() will be removed in the next major release, use the sprintf-js package instead.');
 
-},{"sprintf-js":11,"util-deprecate":85}],62:[function(require,module,exports){
+},{"sprintf-js":12,"util-deprecate":86}],63:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var toPositive = require('./helper/toPositive');
 
@@ -29597,7 +30630,7 @@ module.exports = function startsWith(str, starts, position) {
   return str.lastIndexOf(starts, position) === position;
 };
 
-},{"./helper/makeString":33,"./helper/toPositive":35}],63:[function(require,module,exports){
+},{"./helper/makeString":34,"./helper/toPositive":36}],64:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strLeft(str, sep) {
@@ -29607,7 +30640,7 @@ module.exports = function strLeft(str, sep) {
   return~ pos ? str.slice(0, pos) : str;
 };
 
-},{"./helper/makeString":33}],64:[function(require,module,exports){
+},{"./helper/makeString":34}],65:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strLeftBack(str, sep) {
@@ -29617,7 +30650,7 @@ module.exports = function strLeftBack(str, sep) {
   return~ pos ? str.slice(0, pos) : str;
 };
 
-},{"./helper/makeString":33}],65:[function(require,module,exports){
+},{"./helper/makeString":34}],66:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strRight(str, sep) {
@@ -29627,7 +30660,7 @@ module.exports = function strRight(str, sep) {
   return~ pos ? str.slice(pos + sep.length, str.length) : str;
 };
 
-},{"./helper/makeString":33}],66:[function(require,module,exports){
+},{"./helper/makeString":34}],67:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strRightBack(str, sep) {
@@ -29637,26 +30670,26 @@ module.exports = function strRightBack(str, sep) {
   return~ pos ? str.slice(pos + sep.length, str.length) : str;
 };
 
-},{"./helper/makeString":33}],67:[function(require,module,exports){
+},{"./helper/makeString":34}],68:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function stripTags(str) {
   return makeString(str).replace(/<\/?[^>]+>/g, '');
 };
 
-},{"./helper/makeString":33}],68:[function(require,module,exports){
+},{"./helper/makeString":34}],69:[function(require,module,exports){
 var adjacent = require('./helper/adjacent');
 
 module.exports = function succ(str) {
   return adjacent(str, 1);
 };
 
-},{"./helper/adjacent":28}],69:[function(require,module,exports){
+},{"./helper/adjacent":29}],70:[function(require,module,exports){
 module.exports = function surround(str, wrapper) {
   return [wrapper, str, wrapper].join('');
 };
 
-},{}],70:[function(require,module,exports){
+},{}],71:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function swapCase(str) {
@@ -29665,7 +30698,7 @@ module.exports = function swapCase(str) {
   });
 };
 
-},{"./helper/makeString":33}],71:[function(require,module,exports){
+},{"./helper/makeString":34}],72:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function titleize(str) {
@@ -29674,7 +30707,7 @@ module.exports = function titleize(str) {
   });
 };
 
-},{"./helper/makeString":33}],72:[function(require,module,exports){
+},{"./helper/makeString":34}],73:[function(require,module,exports){
 var trim = require('./trim');
 
 function boolMatch(s, matchers) {
@@ -29696,14 +30729,14 @@ module.exports = function toBoolean(str, trueValues, falseValues) {
   if (boolMatch(str, falseValues || ['false', '0'])) return false;
 };
 
-},{"./trim":76}],73:[function(require,module,exports){
+},{"./trim":77}],74:[function(require,module,exports){
 module.exports = function toNumber(num, precision) {
   if (num == null) return 0;
   var factor = Math.pow(10, isFinite(precision) ? precision : 0);
   return Math.round(num * factor) / factor;
 };
 
-},{}],74:[function(require,module,exports){
+},{}],75:[function(require,module,exports){
 var rtrim = require('./rtrim');
 
 module.exports = function toSentence(array, separator, lastSeparator, serial) {
@@ -29717,14 +30750,14 @@ module.exports = function toSentence(array, separator, lastSeparator, serial) {
   return a.length ? a.join(separator) + lastSeparator + lastMember : lastMember;
 };
 
-},{"./rtrim":58}],75:[function(require,module,exports){
+},{"./rtrim":59}],76:[function(require,module,exports){
 var toSentence = require('./toSentence');
 
 module.exports = function toSentenceSerial(array, sep, lastSep) {
   return toSentence(array, sep, lastSep, true);
 };
 
-},{"./toSentence":74}],76:[function(require,module,exports){
+},{"./toSentence":75}],77:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrim = String.prototype.trim;
@@ -29736,7 +30769,7 @@ module.exports = function trim(str, characters) {
   return str.replace(new RegExp('^' + characters + '+|' + characters + '+$', 'g'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":29,"./helper/makeString":33}],77:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":30,"./helper/makeString":34}],78:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function truncate(str, length, truncateStr) {
@@ -29746,14 +30779,14 @@ module.exports = function truncate(str, length, truncateStr) {
   return str.length > length ? str.slice(0, length) + truncateStr : str;
 };
 
-},{"./helper/makeString":33}],78:[function(require,module,exports){
+},{"./helper/makeString":34}],79:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function underscored(str) {
   return trim(str).replace(/([a-z\d])([A-Z]+)/g, '$1_$2').replace(/[-\s]+/g, '_').toLowerCase();
 };
 
-},{"./trim":76}],79:[function(require,module,exports){
+},{"./trim":77}],80:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var htmlEntities = require('./helper/htmlEntities');
 
@@ -29775,7 +30808,7 @@ module.exports = function unescapeHTML(str) {
   });
 };
 
-},{"./helper/htmlEntities":32,"./helper/makeString":33}],80:[function(require,module,exports){
+},{"./helper/htmlEntities":33,"./helper/makeString":34}],81:[function(require,module,exports){
 module.exports = function unquote(str, quoteChar) {
   quoteChar = quoteChar || '"';
   if (str[0] === quoteChar && str[str.length - 1] === quoteChar)
@@ -29783,13 +30816,13 @@ module.exports = function unquote(str, quoteChar) {
   else return str;
 };
 
-},{}],81:[function(require,module,exports){
+},{}],82:[function(require,module,exports){
 var deprecate = require('util-deprecate');
 
 module.exports = deprecate(require('sprintf-js').vsprintf,
   'vsprintf() will be removed in the next major release, use the sprintf-js package instead.');
 
-},{"sprintf-js":11,"util-deprecate":85}],82:[function(require,module,exports){
+},{"sprintf-js":12,"util-deprecate":86}],83:[function(require,module,exports){
 var isBlank = require('./isBlank');
 var trim = require('./trim');
 
@@ -29798,7 +30831,7 @@ module.exports = function words(str, delimiter) {
   return trim(str, delimiter).split(delimiter || /\s+/);
 };
 
-},{"./isBlank":40,"./trim":76}],83:[function(require,module,exports){
+},{"./isBlank":41,"./trim":77}],84:[function(require,module,exports){
 // Wrap
 // wraps a string by a certain width
 
@@ -29902,7 +30935,7 @@ module.exports = function wrap(str, options){
   }
 };
 
-},{"./helper/makeString":33}],84:[function(require,module,exports){
+},{"./helper/makeString":34}],85:[function(require,module,exports){
 //     Underscore.js 1.8.3
 //     http://underscorejs.org
 //     (c) 2009-2015 Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
@@ -31452,7 +32485,7 @@ module.exports = function wrap(str, options){
   }
 }.call(this));
 
-},{}],85:[function(require,module,exports){
+},{}],86:[function(require,module,exports){
 (function (global){
 
 /**

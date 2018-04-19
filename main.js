@@ -5,6 +5,7 @@ var $ = require('jquery'),
 	latinize = require('latinize'),
 	csv = require('jquery-csv'),
 	L = require('leaflet'),
+	Search = require('leaflet-search'),
 	dissolve = require('geojson-dissolve');
 	//Panel = require('leaflet-panel-layers');
 
@@ -244,6 +245,24 @@ console.log('dissolve: ',json);
 	//TODO fitBounds(json.bbox)
 	geo.addTo(map);
 	//
+	//
+	L.control.search({
+		layer: geo,
+		propertyName: 'name',
+		marker: false,
+		initial: false,
+		casesensitive: false,
+		buildTip: function(text, val) {
+			var name = val.layer.feature.properties.name;
+			return '<a href="#">'+name+'</a>';
+		},
+		moveToLocation: function(latlng, title, map) {
+			var zoom = map.getBoundsZoom(latlng.layer.getBounds());
+  			map.setView(latlng, zoom); // access the zoom
+		}
+	}).on('search:locationfound', function(e) {
+		e.layer.openTooltip();
+	}).addTo(map);
 
 	map.on('click', function(e) {
 		geo.eachLayer(function(l) {
