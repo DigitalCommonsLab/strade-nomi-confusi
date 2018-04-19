@@ -4,11 +4,19 @@ var $ = require('jquery'),
 	s = require('underscore.string'),
 	latinize = require('latinize'),
 	csv = require('jquery-csv'),
-	L = require('leaflet');
+	L = require('leaflet'),
+	dissolve = require('geojson-dissolve');
+	//Panel = require('leaflet-panel-layers');
+
+var levenshtein = require('damerau-levenshtein');
+
+const MIN_LEV_SIMILARITY = 0.85;
 
 _.mixin({str: s});
 
-String.prototype.levenstein = function(string) {
+window._ = _;
+/*
+String.prototype.levenshtein = function(string) {
 	var a = this, b = string + "", m = [], i, j, min = Math.min;
 
 	if (!(a && b)) return (b || a).length;
@@ -26,7 +34,27 @@ String.prototype.levenstein = function(string) {
 	    }
 	}
 	return m[b.length][a.length];
-}
+}*/
+/*
+Array.prototype.compare = function(array) {
+  if (!array) {
+    return false;
+  }
+  if (this.length !== array.length) {
+    return false;
+  }
+  for (var i = 0, l = this.length; i < l; i++) {
+    if (this[i] instanceof Array && array[i] instanceof Array) {
+      if (!this[i].compare(array[i])) {
+        return false;
+      }
+    }
+    else if (this[i] !== array[i]) {
+      return false;
+    }
+  }
+  return true;
+}*/
 
 function getUncommon(text, common) {
     var words = _.str.words(text),
@@ -90,7 +118,7 @@ $.getJSON('data/highway.json', function(json) {
 
 	//TODO normalize properties name:it short_name to only name
 	
-console.log('BEFORE',json);
+console.log('geojson',json);
 
 	var fgroups = _.groupBy(json.features, function(f) {
 		return f.properties.name;
@@ -99,21 +127,25 @@ console.log('BEFORE',json);
 	json.features = _.map(fgroups, function(ff) {
 		//console.log(ff)
 
-		var f1 = ff[0];
+		var f1 = ff[0],
+			fcc = f1.geometry.coordinates;
 
 		for(var f in ff) {
+
+			var cc = ff[f].geometry.coordinates;
 			
-			if(f1.geometry.coordinates[0]==ff[f].geometry.coordinates[0])
-				ff[f].geometry.coordinates = ff[f].geometry.coordinates.reverse();
+			if(_.intersection( _.first(cc), _.first(f1.geometry.coordinates)).length )
+				cc.reverse();
 
-			f1.geometry.coordinates = _.union(f1.geometry.coordinates, ff[f].geometry.coordinates);
+			if(_.intersection( _.last(cc), _.last(f1.geometry.coordinates)).length )
+				cc.reverse();
+
+			f1.geometry = dissolve(f1.geometry, ff[f].geometry);
 		}
-
-		return f1;
+		return f1
 	});
 
-console.log('AFTER',json);
-
+console.log('dissolve: ',json);
 
 	var geo = L.geoJSON(json, {
 			style: function(f) {
@@ -141,10 +173,12 @@ console.log('AFTER',json);
 						opacity: 1,
 					});
 				}).on('mouseout', function(e) {
+
 					e.target.setStyle({
 						weight:4,
 						opacity:0.8
 					});
+
 				}).on('click', function(e) {
 
 					L.DomEvent.stopPropagation(e)
@@ -153,37 +187,58 @@ console.log('AFTER',json);
 
 					geo.eachLayer(function(l) {
 						
-						var lev = e.target.feature.properties.cleanName.levenstein( l.feature.properties.cleanName );
-
-						if( lev < 4) {
+						//var lev = e.target.feature.properties.cleanName.levenstein( l.feature.properties.cleanName );
+						var lev = levenshtein(e.target.feature.properties.cleanName, l.feature.properties.cleanName);
+						lev = lev.similarity;
+						//steps: 0,
+				        //relative: 0,
+				        //similarity: 1
+						if( lev > MIN_LEV_SIMILARITY) {
 							ranks.push({
 								lev: lev,
 								name: l.feature.properties.name,
 								layer: l,
 							});
 						}
+						console.log('"'+e.target.feature.properties.cleanName+'"','==', '"'+l.feature.properties.cleanName+'"', ' ==> ['+lev.toFixed(2)+']');
 
 						l.setStyle({
 							opacity: 0.2
 						});
 					});
 
-					ranks = _.sortBy(ranks, 'lev');//.reverse();
+					ranks = _.sortBy(ranks, 'lev').reverse();
 					ranks = _.first(ranks, 10);
+
+					var bb = ranks[0].layer.getBounds();
 
 					for(let r in ranks) {
 						
+						var lev = parseFloat( (ranks[r].lev*100).toFixed(0) ) || '';
+
 						ranks[r].layer.setStyle({
 							opacity: 1,
 							weight: 10
-						}).bindTooltip(ranks[r].name+'<br />diff: <b>'+ranks[r].lev+'</b>').openTooltip();
+						})
+						.bindTooltip(ranks[r].name+'<br />simile al <b>'+lev+'%</b>');
+						
+						bb.extend( ranks[r].layer.getBounds() );
 					}
+
+					map.once('moveend zoomend', function(e) {
+						for(let r in ranks)
+							ranks[r].layer.openTooltip();
+					});
+					map.fitBounds(bb,{
+						padding: L.point(200,200)
+					});
 
 				});
 			}
 		});
 	//TODO fitBounds(json.bbox)
 	geo.addTo(map);
+	//
 
 	map.on('click', function(e) {
 		geo.eachLayer(function(l) {

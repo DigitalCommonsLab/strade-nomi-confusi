@@ -20,11 +20,19 @@ var $ = require('jquery'),
 	s = require('underscore.string'),
 	latinize = require('latinize'),
 	csv = require('jquery-csv'),
-	L = require('leaflet');
+	L = require('leaflet'),
+	dissolve = require('geojson-dissolve');
+	//Panel = require('leaflet-panel-layers');
+
+var levenshtein = require('damerau-levenshtein');
+
+const MIN_LEV_SIMILARITY = 0.85;
 
 _.mixin({str: s});
 
-String.prototype.levenstein = function(string) {
+window._ = _;
+/*
+String.prototype.levenshtein = function(string) {
 	var a = this, b = string + "", m = [], i, j, min = Math.min;
 
 	if (!(a && b)) return (b || a).length;
@@ -42,7 +50,27 @@ String.prototype.levenstein = function(string) {
 	    }
 	}
 	return m[b.length][a.length];
-}
+}*/
+/*
+Array.prototype.compare = function(array) {
+  if (!array) {
+    return false;
+  }
+  if (this.length !== array.length) {
+    return false;
+  }
+  for (var i = 0, l = this.length; i < l; i++) {
+    if (this[i] instanceof Array && array[i] instanceof Array) {
+      if (!this[i].compare(array[i])) {
+        return false;
+      }
+    }
+    else if (this[i] !== array[i]) {
+      return false;
+    }
+  }
+  return true;
+}*/
 
 function getUncommon(text, common) {
     var words = _.str.words(text),
@@ -106,7 +134,7 @@ $.getJSON('data/highway.json', function(json) {
 
 	//TODO normalize properties name:it short_name to only name
 	
-console.log('BEFORE',json);
+console.log('geojson',json);
 
 	var fgroups = _.groupBy(json.features, function(f) {
 		return f.properties.name;
@@ -115,21 +143,25 @@ console.log('BEFORE',json);
 	json.features = _.map(fgroups, function(ff) {
 		//console.log(ff)
 
-		var f1 = ff[0];
+		var f1 = ff[0],
+			fcc = f1.geometry.coordinates;
 
 		for(var f in ff) {
+
+			var cc = ff[f].geometry.coordinates;
 			
-			if(f1.geometry.coordinates[0]==ff[f].geometry.coordinates[0])
-				ff[f].geometry.coordinates = ff[f].geometry.coordinates.reverse();
+			if(_.intersection( _.first(cc), _.first(f1.geometry.coordinates)).length )
+				cc.reverse();
 
-			f1.geometry.coordinates = _.union(f1.geometry.coordinates, ff[f].geometry.coordinates);
+			if(_.intersection( _.last(cc), _.last(f1.geometry.coordinates)).length )
+				cc.reverse();
+
+			f1.geometry = dissolve(f1.geometry, ff[f].geometry);
 		}
-
-		return f1;
+		return f1
 	});
 
-console.log('AFTER',json);
-
+console.log('dissolve: ',json);
 
 	var geo = L.geoJSON(json, {
 			style: function(f) {
@@ -157,10 +189,12 @@ console.log('AFTER',json);
 						opacity: 1,
 					});
 				}).on('mouseout', function(e) {
+
 					e.target.setStyle({
 						weight:4,
 						opacity:0.8
 					});
+
 				}).on('click', function(e) {
 
 					L.DomEvent.stopPropagation(e)
@@ -169,37 +203,58 @@ console.log('AFTER',json);
 
 					geo.eachLayer(function(l) {
 						
-						var lev = e.target.feature.properties.cleanName.levenstein( l.feature.properties.cleanName );
-
-						if( lev < 4) {
+						//var lev = e.target.feature.properties.cleanName.levenstein( l.feature.properties.cleanName );
+						var lev = levenshtein(e.target.feature.properties.cleanName, l.feature.properties.cleanName);
+						lev = lev.similarity;
+						//steps: 0,
+				        //relative: 0,
+				        //similarity: 1
+						if( lev > MIN_LEV_SIMILARITY) {
 							ranks.push({
 								lev: lev,
 								name: l.feature.properties.name,
 								layer: l,
 							});
 						}
+						console.log('"'+e.target.feature.properties.cleanName+'"','==', '"'+l.feature.properties.cleanName+'"', ' ==> ['+lev.toFixed(2)+']');
 
 						l.setStyle({
 							opacity: 0.2
 						});
 					});
 
-					ranks = _.sortBy(ranks, 'lev');//.reverse();
+					ranks = _.sortBy(ranks, 'lev').reverse();
 					ranks = _.first(ranks, 10);
+
+					var bb = ranks[0].layer.getBounds();
 
 					for(let r in ranks) {
 						
+						var lev = parseFloat( (ranks[r].lev*100).toFixed(0) ) || '';
+
 						ranks[r].layer.setStyle({
 							opacity: 1,
 							weight: 10
-						}).bindTooltip(ranks[r].name+'<br /><b>'+ranks[r].lev+'</b>').openTooltip();
+						})
+						.bindTooltip(ranks[r].name+'<br />simile al <b>'+lev+'%</b>');
+						
+						bb.extend( ranks[r].layer.getBounds() );
 					}
+
+					map.once('moveend zoomend', function(e) {
+						for(let r in ranks)
+							ranks[r].layer.openTooltip();
+					});
+					map.fitBounds(bb,{
+						padding: L.point(200,200)
+					});
 
 				});
 			}
 		});
 	//TODO fitBounds(json.bbox)
 	geo.addTo(map);
+	//
 
 	map.on('click', function(e) {
 		geo.eachLayer(function(l) {
@@ -211,7 +266,924 @@ console.log('AFTER',json);
 	});
 
 });
-},{"jquery":3,"jquery-csv":2,"latinize":4,"leaflet":5,"underscore":77,"underscore.string":31}],2:[function(require,module,exports){
+},{"damerau-levenshtein":3,"geojson-dissolve":4,"jquery":8,"jquery-csv":7,"latinize":9,"leaflet":10,"underscore":84,"underscore.string":38}],2:[function(require,module,exports){
+/**
+ * Callback for coordEach
+ *
+ * @private
+ * @callback coordEachCallback
+ * @param {[number, number]} currentCoords The current coordinates being processed.
+ * @param {number} currentIndex The index of the current element being processed in the
+ * array.Starts at index 0, if an initialValue is provided, and at index 1 otherwise.
+ */
+
+/**
+ * Iterate over coordinates in any GeoJSON object, similar to Array.forEach()
+ *
+ * @name coordEach
+ * @param {Object} layer any GeoJSON object
+ * @param {Function} callback a method that takes (currentCoords, currentIndex)
+ * @param {boolean} [excludeWrapCoord=false] whether or not to include
+ * the final coordinate of LinearRings that wraps the ring in its iteration.
+ * @example
+ * var features = {
+ *   "type": "FeatureCollection",
+ *   "features": [
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [26, 37]
+ *       }
+ *     },
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [36, 53]
+ *       }
+ *     }
+ *   ]
+ * };
+ * turf.coordEach(features, function (currentCoords, currentIndex) {
+ *   //=currentCoords
+ *   //=currentIndex
+ * });
+ */
+function coordEach(layer, callback, excludeWrapCoord) {
+    var i, j, k, g, l, geometry, stopG, coords,
+        geometryMaybeCollection,
+        wrapShrink = 0,
+        currentIndex = 0,
+        isGeometryCollection,
+        isFeatureCollection = layer.type === 'FeatureCollection',
+        isFeature = layer.type === 'Feature',
+        stop = isFeatureCollection ? layer.features.length : 1;
+
+  // This logic may look a little weird. The reason why it is that way
+  // is because it's trying to be fast. GeoJSON supports multiple kinds
+  // of objects at its root: FeatureCollection, Features, Geometries.
+  // This function has the responsibility of handling all of them, and that
+  // means that some of the `for` loops you see below actually just don't apply
+  // to certain inputs. For instance, if you give this just a
+  // Point geometry, then both loops are short-circuited and all we do
+  // is gradually rename the input until it's called 'geometry'.
+  //
+  // This also aims to allocate as few resources as possible: just a
+  // few numbers and booleans, rather than any temporary arrays as would
+  // be required with the normalization approach.
+    for (i = 0; i < stop; i++) {
+
+        geometryMaybeCollection = (isFeatureCollection ? layer.features[i].geometry :
+        (isFeature ? layer.geometry : layer));
+        isGeometryCollection = geometryMaybeCollection.type === 'GeometryCollection';
+        stopG = isGeometryCollection ? geometryMaybeCollection.geometries.length : 1;
+
+        for (g = 0; g < stopG; g++) {
+            geometry = isGeometryCollection ?
+            geometryMaybeCollection.geometries[g] : geometryMaybeCollection;
+            coords = geometry.coordinates;
+
+            wrapShrink = (excludeWrapCoord &&
+                (geometry.type === 'Polygon' || geometry.type === 'MultiPolygon')) ?
+                1 : 0;
+
+            if (geometry.type === 'Point') {
+                callback(coords, currentIndex);
+                currentIndex++;
+            } else if (geometry.type === 'LineString' || geometry.type === 'MultiPoint') {
+                for (j = 0; j < coords.length; j++) {
+                    callback(coords[j], currentIndex);
+                    currentIndex++;
+                }
+            } else if (geometry.type === 'Polygon' || geometry.type === 'MultiLineString') {
+                for (j = 0; j < coords.length; j++)
+                    for (k = 0; k < coords[j].length - wrapShrink; k++) {
+                        callback(coords[j][k], currentIndex);
+                        currentIndex++;
+                    }
+            } else if (geometry.type === 'MultiPolygon') {
+                for (j = 0; j < coords.length; j++)
+                    for (k = 0; k < coords[j].length; k++)
+                        for (l = 0; l < coords[j][k].length - wrapShrink; l++) {
+                            callback(coords[j][k][l], currentIndex);
+                            currentIndex++;
+                        }
+            } else if (geometry.type === 'GeometryCollection') {
+                for (j = 0; j < geometry.geometries.length; j++)
+                    coordEach(geometry.geometries[j], callback, excludeWrapCoord);
+            } else {
+                throw new Error('Unknown Geometry Type');
+            }
+        }
+    }
+}
+module.exports.coordEach = coordEach;
+
+/**
+ * Callback for coordReduce
+ *
+ * The first time the callback function is called, the values provided as arguments depend
+ * on whether the reduce method has an initialValue argument.
+ *
+ * If an initialValue is provided to the reduce method:
+ *  - The previousValue argument is initialValue.
+ *  - The currentValue argument is the value of the first element present in the array.
+ *
+ * If an initialValue is not provided:
+ *  - The previousValue argument is the value of the first element present in the array.
+ *  - The currentValue argument is the value of the second element present in the array.
+ *
+ * @private
+ * @callback coordReduceCallback
+ * @param {*} previousValue The accumulated value previously returned in the last invocation
+ * of the callback, or initialValue, if supplied.
+ * @param {[number, number]} currentCoords The current coordinate being processed.
+ * @param {number} currentIndex The index of the current element being processed in the
+ * array.Starts at index 0, if an initialValue is provided, and at index 1 otherwise.
+ */
+
+/**
+ * Reduce coordinates in any GeoJSON object, similar to Array.reduce()
+ *
+ * @name coordReduce
+ * @param {Object} layer any GeoJSON object
+ * @param {Function} callback a method that takes (previousValue, currentCoords, currentIndex)
+ * @param {*} [initialValue] Value to use as the first argument to the first call of the callback.
+ * @param {boolean} [excludeWrapCoord=false] whether or not to include
+ * the final coordinate of LinearRings that wraps the ring in its iteration.
+ * @returns {*} The value that results from the reduction.
+ * @example
+ * var features = {
+ *   "type": "FeatureCollection",
+ *   "features": [
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [26, 37]
+ *       }
+ *     },
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [36, 53]
+ *       }
+ *     }
+ *   ]
+ * };
+ * turf.coordReduce(features, function (previousValue, currentCoords, currentIndex) {
+ *   //=previousValue
+ *   //=currentCoords
+ *   //=currentIndex
+ *   return currentCoords;
+ * });
+ */
+function coordReduce(layer, callback, initialValue, excludeWrapCoord) {
+    var previousValue = initialValue;
+    coordEach(layer, function (currentCoords, currentIndex) {
+        if (currentIndex === 0 && initialValue === undefined) {
+            previousValue = currentCoords;
+        } else {
+            previousValue = callback(previousValue, currentCoords, currentIndex);
+        }
+    }, excludeWrapCoord);
+    return previousValue;
+}
+module.exports.coordReduce = coordReduce;
+
+/**
+ * Callback for propEach
+ *
+ * @private
+ * @callback propEachCallback
+ * @param {*} currentProperties The current properties being processed.
+ * @param {number} currentIndex The index of the current element being processed in the
+ * array.Starts at index 0, if an initialValue is provided, and at index 1 otherwise.
+ */
+
+/**
+ * Iterate over properties in any GeoJSON object, similar to Array.forEach()
+ *
+ * @name propEach
+ * @param {Object} layer any GeoJSON object
+ * @param {Function} callback a method that takes (currentProperties, currentIndex)
+ * @example
+ * var features = {
+ *   "type": "FeatureCollection",
+ *   "features": [
+ *     {
+ *       "type": "Feature",
+ *       "properties": {"foo": "bar"},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [26, 37]
+ *       }
+ *     },
+ *     {
+ *       "type": "Feature",
+ *       "properties": {"hello": "world"},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [36, 53]
+ *       }
+ *     }
+ *   ]
+ * };
+ * turf.propEach(features, function (currentProperties, currentIndex) {
+ *   //=currentProperties
+ *   //=currentIndex
+ * });
+ */
+function propEach(layer, callback) {
+    var i;
+    switch (layer.type) {
+    case 'FeatureCollection':
+        for (i = 0; i < layer.features.length; i++) {
+            callback(layer.features[i].properties, i);
+        }
+        break;
+    case 'Feature':
+        callback(layer.properties, 0);
+        break;
+    }
+}
+module.exports.propEach = propEach;
+
+
+/**
+ * Callback for propReduce
+ *
+ * The first time the callback function is called, the values provided as arguments depend
+ * on whether the reduce method has an initialValue argument.
+ *
+ * If an initialValue is provided to the reduce method:
+ *  - The previousValue argument is initialValue.
+ *  - The currentValue argument is the value of the first element present in the array.
+ *
+ * If an initialValue is not provided:
+ *  - The previousValue argument is the value of the first element present in the array.
+ *  - The currentValue argument is the value of the second element present in the array.
+ *
+ * @private
+ * @callback propReduceCallback
+ * @param {*} previousValue The accumulated value previously returned in the last invocation
+ * of the callback, or initialValue, if supplied.
+ * @param {*} currentProperties The current properties being processed.
+ * @param {number} currentIndex The index of the current element being processed in the
+ * array.Starts at index 0, if an initialValue is provided, and at index 1 otherwise.
+ */
+
+/**
+ * Reduce properties in any GeoJSON object into a single value,
+ * similar to how Array.reduce works. However, in this case we lazily run
+ * the reduction, so an array of all properties is unnecessary.
+ *
+ * @name propReduce
+ * @param {Object} layer any GeoJSON object
+ * @param {Function} callback a method that takes (previousValue, currentProperties, currentIndex)
+ * @param {*} [initialValue] Value to use as the first argument to the first call of the callback.
+ * @returns {*} The value that results from the reduction.
+ * @example
+ * var features = {
+ *   "type": "FeatureCollection",
+ *   "features": [
+ *     {
+ *       "type": "Feature",
+ *       "properties": {"foo": "bar"},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [26, 37]
+ *       }
+ *     },
+ *     {
+ *       "type": "Feature",
+ *       "properties": {"hello": "world"},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [36, 53]
+ *       }
+ *     }
+ *   ]
+ * };
+ * turf.propReduce(features, function (previousValue, currentProperties, currentIndex) {
+ *   //=previousValue
+ *   //=currentProperties
+ *   //=currentIndex
+ *   return currentProperties
+ * });
+ */
+function propReduce(layer, callback, initialValue) {
+    var previousValue = initialValue;
+    propEach(layer, function (currentProperties, currentIndex) {
+        if (currentIndex === 0 && initialValue === undefined) {
+            previousValue = currentProperties;
+        } else {
+            previousValue = callback(previousValue, currentProperties, currentIndex);
+        }
+    });
+    return previousValue;
+}
+module.exports.propReduce = propReduce;
+
+/**
+ * Callback for featureEach
+ *
+ * @private
+ * @callback featureEachCallback
+ * @param {Feature<any>} currentFeature The current feature being processed.
+ * @param {number} currentIndex The index of the current element being processed in the
+ * array.Starts at index 0, if an initialValue is provided, and at index 1 otherwise.
+ */
+
+/**
+ * Iterate over features in any GeoJSON object, similar to
+ * Array.forEach.
+ *
+ * @name featureEach
+ * @param {Object} layer any GeoJSON object
+ * @param {Function} callback a method that takes (currentFeature, currentIndex)
+ * @example
+ * var features = {
+ *   "type": "FeatureCollection",
+ *   "features": [
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [26, 37]
+ *       }
+ *     },
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [36, 53]
+ *       }
+ *     }
+ *   ]
+ * };
+ * turf.featureEach(features, function (currentFeature, currentIndex) {
+ *   //=currentFeature
+ *   //=currentIndex
+ * });
+ */
+function featureEach(layer, callback) {
+    if (layer.type === 'Feature') {
+        callback(layer, 0);
+    } else if (layer.type === 'FeatureCollection') {
+        for (var i = 0; i < layer.features.length; i++) {
+            callback(layer.features[i], i);
+        }
+    }
+}
+module.exports.featureEach = featureEach;
+
+/**
+ * Callback for featureReduce
+ *
+ * The first time the callback function is called, the values provided as arguments depend
+ * on whether the reduce method has an initialValue argument.
+ *
+ * If an initialValue is provided to the reduce method:
+ *  - The previousValue argument is initialValue.
+ *  - The currentValue argument is the value of the first element present in the array.
+ *
+ * If an initialValue is not provided:
+ *  - The previousValue argument is the value of the first element present in the array.
+ *  - The currentValue argument is the value of the second element present in the array.
+ *
+ * @private
+ * @callback featureReduceCallback
+ * @param {*} previousValue The accumulated value previously returned in the last invocation
+ * of the callback, or initialValue, if supplied.
+ * @param {Feature<any>} currentFeature The current Feature being processed.
+ * @param {number} currentIndex The index of the current element being processed in the
+ * array.Starts at index 0, if an initialValue is provided, and at index 1 otherwise.
+ */
+
+/**
+ * Reduce features in any GeoJSON object, similar to Array.reduce().
+ *
+ * @name featureReduce
+ * @param {Object} layer any GeoJSON object
+ * @param {Function} callback a method that takes (previousValue, currentFeature, currentIndex)
+ * @param {*} [initialValue] Value to use as the first argument to the first call of the callback.
+ * @returns {*} The value that results from the reduction.
+ * @example
+ * var features = {
+ *   "type": "FeatureCollection",
+ *   "features": [
+ *     {
+ *       "type": "Feature",
+ *       "properties": {"foo": "bar"},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [26, 37]
+ *       }
+ *     },
+ *     {
+ *       "type": "Feature",
+ *       "properties": {"hello": "world"},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [36, 53]
+ *       }
+ *     }
+ *   ]
+ * };
+ * turf.featureReduce(features, function (previousValue, currentFeature, currentIndex) {
+ *   //=previousValue
+ *   //=currentFeature
+ *   //=currentIndex
+ *   return currentFeature
+ * });
+ */
+function featureReduce(layer, callback, initialValue) {
+    var previousValue = initialValue;
+    featureEach(layer, function (currentFeature, currentIndex) {
+        if (currentIndex === 0 && initialValue === undefined) {
+            previousValue = currentFeature;
+        } else {
+            previousValue = callback(previousValue, currentFeature, currentIndex);
+        }
+    });
+    return previousValue;
+}
+module.exports.featureReduce = featureReduce;
+
+/**
+ * Get all coordinates from any GeoJSON object.
+ *
+ * @name coordAll
+ * @param {Object} layer any GeoJSON object
+ * @returns {Array<Array<number>>} coordinate position array
+ * @example
+ * var features = {
+ *   "type": "FeatureCollection",
+ *   "features": [
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [26, 37]
+ *       }
+ *     },
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [36, 53]
+ *       }
+ *     }
+ *   ]
+ * };
+ * var coords = turf.coordAll(features);
+ * //=coords
+ */
+function coordAll(layer) {
+    var coords = [];
+    coordEach(layer, function (coord) {
+        coords.push(coord);
+    });
+    return coords;
+}
+module.exports.coordAll = coordAll;
+
+/**
+ * Iterate over each geometry in any GeoJSON object, similar to Array.forEach()
+ *
+ * @name geomEach
+ * @param {Object} layer any GeoJSON object
+ * @param {Function} callback a method that takes (currentGeometry, currentIndex)
+ * @example
+ * var features = {
+ *   "type": "FeatureCollection",
+ *   "features": [
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [26, 37]
+ *       }
+ *     },
+ *     {
+ *       "type": "Feature",
+ *       "properties": {},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [36, 53]
+ *       }
+ *     }
+ *   ]
+ * };
+ * turf.geomEach(features, function (currentGeometry, currentIndex) {
+ *   //=currentGeometry
+ *   //=currentIndex
+ * });
+ */
+function geomEach(layer, callback) {
+    var i, j, g, geometry, stopG,
+        geometryMaybeCollection,
+        isGeometryCollection,
+        currentIndex = 0,
+        isFeatureCollection = layer.type === 'FeatureCollection',
+        isFeature = layer.type === 'Feature',
+        stop = isFeatureCollection ? layer.features.length : 1;
+
+  // This logic may look a little weird. The reason why it is that way
+  // is because it's trying to be fast. GeoJSON supports multiple kinds
+  // of objects at its root: FeatureCollection, Features, Geometries.
+  // This function has the responsibility of handling all of them, and that
+  // means that some of the `for` loops you see below actually just don't apply
+  // to certain inputs. For instance, if you give this just a
+  // Point geometry, then both loops are short-circuited and all we do
+  // is gradually rename the input until it's called 'geometry'.
+  //
+  // This also aims to allocate as few resources as possible: just a
+  // few numbers and booleans, rather than any temporary arrays as would
+  // be required with the normalization approach.
+    for (i = 0; i < stop; i++) {
+
+        geometryMaybeCollection = (isFeatureCollection ? layer.features[i].geometry :
+        (isFeature ? layer.geometry : layer));
+        isGeometryCollection = geometryMaybeCollection.type === 'GeometryCollection';
+        stopG = isGeometryCollection ? geometryMaybeCollection.geometries.length : 1;
+
+        for (g = 0; g < stopG; g++) {
+            geometry = isGeometryCollection ?
+            geometryMaybeCollection.geometries[g] : geometryMaybeCollection;
+
+            if (geometry.type === 'Point' ||
+                geometry.type === 'LineString' ||
+                geometry.type === 'MultiPoint' ||
+                geometry.type === 'Polygon' ||
+                geometry.type === 'MultiLineString' ||
+                geometry.type === 'MultiPolygon') {
+                callback(geometry, currentIndex);
+                currentIndex++;
+            } else if (geometry.type === 'GeometryCollection') {
+                for (j = 0; j < geometry.geometries.length; j++) {
+                    callback(geometry.geometries[j], currentIndex);
+                    currentIndex++;
+                }
+            } else {
+                throw new Error('Unknown Geometry Type');
+            }
+        }
+    }
+}
+module.exports.geomEach = geomEach;
+
+/**
+ * Callback for geomReduce
+ *
+ * The first time the callback function is called, the values provided as arguments depend
+ * on whether the reduce method has an initialValue argument.
+ *
+ * If an initialValue is provided to the reduce method:
+ *  - The previousValue argument is initialValue.
+ *  - The currentValue argument is the value of the first element present in the array.
+ *
+ * If an initialValue is not provided:
+ *  - The previousValue argument is the value of the first element present in the array.
+ *  - The currentValue argument is the value of the second element present in the array.
+ *
+ * @private
+ * @callback geomReduceCallback
+ * @param {*} previousValue The accumulated value previously returned in the last invocation
+ * of the callback, or initialValue, if supplied.
+ * @param {*} currentGeometry The current Feature being processed.
+ * @param {number} currentIndex The index of the current element being processed in the
+ * array.Starts at index 0, if an initialValue is provided, and at index 1 otherwise.
+ */
+
+/**
+ * Reduce geometry in any GeoJSON object, similar to Array.reduce().
+ *
+ * @name geomReduce
+ * @param {Object} layer any GeoJSON object
+ * @param {Function} callback a method that takes (previousValue, currentGeometry, currentIndex)
+ * @param {*} [initialValue] Value to use as the first argument to the first call of the callback.
+ * @returns {*} The value that results from the reduction.
+ * @example
+ * var features = {
+ *   "type": "FeatureCollection",
+ *   "features": [
+ *     {
+ *       "type": "Feature",
+ *       "properties": {"foo": "bar"},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [26, 37]
+ *       }
+ *     },
+ *     {
+ *       "type": "Feature",
+ *       "properties": {"hello": "world"},
+ *       "geometry": {
+ *         "type": "Point",
+ *         "coordinates": [36, 53]
+ *       }
+ *     }
+ *   ]
+ * };
+ * turf.geomReduce(features, function (previousValue, currentGeometry, currentIndex) {
+ *   //=previousValue
+ *   //=currentGeometry
+ *   //=currentIndex
+ *   return currentGeometry
+ * });
+ */
+function geomReduce(layer, callback, initialValue) {
+    var previousValue = initialValue;
+    geomEach(layer, function (currentGeometry, currentIndex) {
+        if (currentIndex === 0 && initialValue === undefined) {
+            previousValue = currentGeometry;
+        } else {
+            previousValue = callback(previousValue, currentGeometry, currentIndex);
+        }
+    });
+    return previousValue;
+}
+module.exports.geomReduce = geomReduce;
+
+},{}],3:[function(require,module,exports){
+// TheSpanishInquisition
+
+// Cache the matrix. Note that if you not pass a limit this implementation will use a dynamically calculate one.
+
+module.exports = function(__this, that, limit) {
+
+  var thisLength = __this.length,
+      thatLength = that.length,
+      matrix = [];
+
+  // If the limit is not defined it will be calculate from this and that args.
+  limit = (limit || ((thatLength > thisLength ? thatLength : thisLength)))+1;
+
+  for (var i = 0; i < limit; i++) {
+    matrix[i] = [i];
+    matrix[i].length = limit;
+  }
+  for (i = 0; i < limit; i++) {
+    matrix[0][i] = i;
+  }
+
+  if (Math.abs(thisLength - thatLength) > (limit || 100)){
+    return prepare (limit || 100);
+  }
+  if (thisLength === 0){
+    return prepare (thatLength);
+  }
+  if (thatLength === 0){
+    return prepare (thisLength);
+  }
+
+  // Calculate matrix.
+  var j, this_i, that_j, cost, min, t;
+  for (i = 1; i <= thisLength; ++i) {
+    this_i = __this[i-1];
+
+    // Step 4
+    for (j = 1; j <= thatLength; ++j) {
+      // Check the jagged ld total so far
+      if (i === j && matrix[i][j] > 4) return prepare (thisLength);
+
+      that_j = that[j-1];
+      cost = (this_i === that_j) ? 0 : 1; // Step 5
+      // Calculate the minimum (much faster than Math.min(...)).
+      min    = matrix[i - 1][j    ] + 1; // Deletion.
+      if ((t = matrix[i    ][j - 1] + 1   ) < min) min = t;   // Insertion.
+      if ((t = matrix[i - 1][j - 1] + cost) < min) min = t;   // Substitution.
+
+      // Update matrix.
+      matrix[i][j] = (i > 1 && j > 1 && this_i === that[j-2] && __this[i-2] === that_j && (t = matrix[i-2][j-2]+cost) < min) ? t : min; // Transposition.
+    }
+  }
+
+  return prepare (matrix[thisLength][thatLength]);
+
+/**
+ *
+ */
+  function prepare(steps) {
+    var length = Math.max(thisLength, thatLength)
+    var relative = length === 0
+      ? 0
+      : (steps / length);
+    var similarity = 1 - relative
+    return {
+      steps: steps,
+      relative: relative,
+      similarity: similarity
+    };
+  }
+
+};
+
+},{}],4:[function(require,module,exports){
+var createTopology = require('topojson-server').topology
+var mergeTopology = require('topojson-client').merge
+var dissolveLineStrings = require('geojson-linestring-dissolve')
+var geomEach = require('@turf/meta').geomEach
+var flatten = require('geojson-flatten')
+
+module.exports = dissolve
+
+function toArray (args) {
+  if (!args.length) return []
+  return Array.isArray(args[0]) ? args[0] : Array.prototype.slice.call(args)
+}
+
+function dissolvePolygons (geoms) {
+  // Topojson modifies in place, so we need to deep clone first
+  var objects = {
+    geoms: {
+      type: 'GeometryCollection',
+      geometries: JSON.parse(JSON.stringify(geoms))
+    }
+  }
+  var topo = createTopology(objects)
+  return mergeTopology(topo, topo.objects.geoms.geometries)
+}
+
+// [GeoJSON] -> String|Null
+function getHomogenousType (geoms) {
+  var type = null
+  for (var i = 0; i < geoms.length; i++) {
+    if (!type) {
+      type = geoms[i].type
+    } else if (type !== geoms[i].type) {
+      return null
+    }
+  }
+  return type
+}
+
+// Transform function: attempts to dissolve geojson objects where possible
+// [GeoJSON] -> GeoJSON geometry
+function dissolve () {
+  // accept an array of geojson objects, or an argument list
+  var objects = toArray(arguments)
+  var geoms = objects.reduce(function (acc, o) {
+    // flatten any Multi-geom into features of simple types
+    var flat = flatten(o)
+    if (!Array.isArray(flat)) flat = [flat]
+    for (var i = 0; i < flat.length; i++) {
+      // get an array of all flatten geometry objects
+      geomEach(flat[i], function (geom) {
+        acc.push(geom)
+      })
+    }
+    return acc
+  }, [])
+  // Assert homogenity
+  var type = getHomogenousType(geoms)
+  if (!type) {
+    throw new Error('List does not contain only homoegenous GeoJSON')
+  }
+
+  switch (type) {
+    case 'LineString':
+      return dissolveLineStrings(geoms)
+    case 'Polygon':
+      return dissolvePolygons(geoms)
+    default:
+      return geoms
+  }
+}
+
+
+},{"@turf/meta":2,"geojson-flatten":5,"geojson-linestring-dissolve":6,"topojson-client":12,"topojson-server":13}],5:[function(require,module,exports){
+function flatten(gj) {
+    switch ((gj && gj.type) || null) {
+        case 'FeatureCollection':
+            gj.features = gj.features.reduce(function(mem, feature) {
+                return mem.concat(flatten(feature));
+            }, []);
+            return gj;
+        case 'Feature':
+            if (!gj.geometry) return gj;
+            return flatten(gj.geometry).map(function(geom) {
+                return {
+                    type: 'Feature',
+                    properties: JSON.parse(JSON.stringify(gj.properties)),
+                    geometry: geom
+                };
+            });
+        case 'MultiPoint':
+            return gj.coordinates.map(function(_) {
+                return { type: 'Point', coordinates: _ };
+            });
+        case 'MultiPolygon':
+            return gj.coordinates.map(function(_) {
+                return { type: 'Polygon', coordinates: _ };
+            });
+        case 'MultiLineString':
+            return gj.coordinates.map(function(_) {
+                return { type: 'LineString', coordinates: _ };
+            });
+        case 'GeometryCollection':
+            return gj.geometries.map(flatten).reduce(function(memo, geoms) {
+                return memo.concat(geoms);
+            }, []);
+        case 'Point':
+        case 'Polygon':
+        case 'LineString':
+            return [gj];
+    }
+}
+
+module.exports = flatten;
+
+},{}],6:[function(require,module,exports){
+module.exports = mergeViableLineStrings
+
+// [Number, Number] -> String
+function coordId (coord) {
+  return coord[0].toString() + ',' + coord[1].toString()
+}
+
+// LineString, LineString -> LineString
+function mergeLineStrings (a, b) {
+  var s1 = coordId(a.coordinates[0])
+  var e1 = coordId(a.coordinates[a.coordinates.length - 1])
+  var s2 = coordId(b.coordinates[0])
+  var e2 = coordId(b.coordinates[b.coordinates.length - 1])
+
+  // TODO: handle case where more than one of these is true!
+
+  var coords
+  if (s1 === e2) {
+    coords = b.coordinates.concat(a.coordinates.slice(1))
+  } else if (s2 === e1) {
+    coords = a.coordinates.concat(b.coordinates.slice(1))
+  } else if (s1 === s2) {
+    coords = a.coordinates.slice(1).reverse().concat(b.coordinates)
+  } else if (e1 === e2) {
+    coords = a.coordinates.concat(b.coordinates.reverse().slice(1))
+  } else {
+    return null
+  }
+
+  return {
+    type: 'LineString',
+    coordinates: coords
+  }
+}
+
+// Merges all connected (non-forking, non-junctioning) line strings into single
+// line strings.
+// [LineString] -> LineString|MultiLineString
+function mergeViableLineStrings (geoms) {
+  // TODO: assert all are linestrings
+
+  var lineStrings = geoms.slice()
+  var result = []
+  while (lineStrings.length > 0) {
+    var ls = lineStrings.shift()
+
+    // Attempt to merge this LineString with the other LineStrings, updating
+    // the reference as it is merged with others and grows.
+    lineStrings = lineStrings.reduce(function (accum, cur) {
+      var merged = mergeLineStrings(ls, cur)
+      if (merged) {
+        // Accumulate the merged LineString
+        ls = merged
+      } else {
+        // Put the unmerged LineString back into the list
+        accum.push(cur)
+      }
+      return accum
+    }, [])
+
+    result.push(ls)
+  }
+
+  if (result.length === 1) {
+    result = result[0]
+  } else {
+    result = {
+      type: 'MultiLineString',
+      coordinates: result.map(function (ls) { return ls.coordinates })
+    }
+  }
+  return result
+}
+
+
+},{}],7:[function(require,module,exports){
 /**
  * jQuery-csv (jQuery Plugin)
  *
@@ -1193,7 +2165,7 @@ RegExp.escape = function (s) {
   }
 }).call(this);
 
-},{}],3:[function(require,module,exports){
+},{}],8:[function(require,module,exports){
 /*!
  * jQuery JavaScript Library v3.3.1
  * https://jquery.com/
@@ -11559,7 +12531,7 @@ if ( !noGlobal ) {
 return jQuery;
 } );
 
-},{}],4:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 (function(root, factory) {
   if (typeof define === 'function' && define.amd) {
     // AMD. Register as an anonymous module.
@@ -12480,7 +13452,7 @@ return jQuery;
   return latinize;
 });
 
-},{}],5:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 /* @preserve
  * Leaflet 1.3.1, a JS library for interactive maps. http://leafletjs.com
  * (c) 2010-2017 Vladimir Agafonkin, (c) 2010-2011 CloudMade
@@ -26284,7 +27256,7 @@ exports.map = createMap;
 })));
 
 
-},{}],6:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 /* global window, exports, define */
 
 !function() {
@@ -26504,7 +27476,1352 @@ exports.map = createMap;
     /* eslint-enable quote-props */
 }()
 
-},{}],7:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
+// https://github.com/topojson/topojson-client Version 3.0.0. Copyright 2017 Mike Bostock.
+(function (global, factory) {
+	typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
+	typeof define === 'function' && define.amd ? define(['exports'], factory) :
+	(factory((global.topojson = global.topojson || {})));
+}(this, (function (exports) { 'use strict';
+
+var identity = function(x) {
+  return x;
+};
+
+var transform = function(transform) {
+  if (transform == null) return identity;
+  var x0,
+      y0,
+      kx = transform.scale[0],
+      ky = transform.scale[1],
+      dx = transform.translate[0],
+      dy = transform.translate[1];
+  return function(input, i) {
+    if (!i) x0 = y0 = 0;
+    var j = 2, n = input.length, output = new Array(n);
+    output[0] = (x0 += input[0]) * kx + dx;
+    output[1] = (y0 += input[1]) * ky + dy;
+    while (j < n) output[j] = input[j], ++j;
+    return output;
+  };
+};
+
+var bbox = function(topology) {
+  var t = transform(topology.transform), key,
+      x0 = Infinity, y0 = x0, x1 = -x0, y1 = -x0;
+
+  function bboxPoint(p) {
+    p = t(p);
+    if (p[0] < x0) x0 = p[0];
+    if (p[0] > x1) x1 = p[0];
+    if (p[1] < y0) y0 = p[1];
+    if (p[1] > y1) y1 = p[1];
+  }
+
+  function bboxGeometry(o) {
+    switch (o.type) {
+      case "GeometryCollection": o.geometries.forEach(bboxGeometry); break;
+      case "Point": bboxPoint(o.coordinates); break;
+      case "MultiPoint": o.coordinates.forEach(bboxPoint); break;
+    }
+  }
+
+  topology.arcs.forEach(function(arc) {
+    var i = -1, n = arc.length, p;
+    while (++i < n) {
+      p = t(arc[i], i);
+      if (p[0] < x0) x0 = p[0];
+      if (p[0] > x1) x1 = p[0];
+      if (p[1] < y0) y0 = p[1];
+      if (p[1] > y1) y1 = p[1];
+    }
+  });
+
+  for (key in topology.objects) {
+    bboxGeometry(topology.objects[key]);
+  }
+
+  return [x0, y0, x1, y1];
+};
+
+var reverse = function(array, n) {
+  var t, j = array.length, i = j - n;
+  while (i < --j) t = array[i], array[i++] = array[j], array[j] = t;
+};
+
+var feature = function(topology, o) {
+  return o.type === "GeometryCollection"
+      ? {type: "FeatureCollection", features: o.geometries.map(function(o) { return feature$1(topology, o); })}
+      : feature$1(topology, o);
+};
+
+function feature$1(topology, o) {
+  var id = o.id,
+      bbox = o.bbox,
+      properties = o.properties == null ? {} : o.properties,
+      geometry = object(topology, o);
+  return id == null && bbox == null ? {type: "Feature", properties: properties, geometry: geometry}
+      : bbox == null ? {type: "Feature", id: id, properties: properties, geometry: geometry}
+      : {type: "Feature", id: id, bbox: bbox, properties: properties, geometry: geometry};
+}
+
+function object(topology, o) {
+  var transformPoint = transform(topology.transform),
+      arcs = topology.arcs;
+
+  function arc(i, points) {
+    if (points.length) points.pop();
+    for (var a = arcs[i < 0 ? ~i : i], k = 0, n = a.length; k < n; ++k) {
+      points.push(transformPoint(a[k], k));
+    }
+    if (i < 0) reverse(points, n);
+  }
+
+  function point(p) {
+    return transformPoint(p);
+  }
+
+  function line(arcs) {
+    var points = [];
+    for (var i = 0, n = arcs.length; i < n; ++i) arc(arcs[i], points);
+    if (points.length < 2) points.push(points[0]); // This should never happen per the specification.
+    return points;
+  }
+
+  function ring(arcs) {
+    var points = line(arcs);
+    while (points.length < 4) points.push(points[0]); // This may happen if an arc has only two points.
+    return points;
+  }
+
+  function polygon(arcs) {
+    return arcs.map(ring);
+  }
+
+  function geometry(o) {
+    var type = o.type, coordinates;
+    switch (type) {
+      case "GeometryCollection": return {type: type, geometries: o.geometries.map(geometry)};
+      case "Point": coordinates = point(o.coordinates); break;
+      case "MultiPoint": coordinates = o.coordinates.map(point); break;
+      case "LineString": coordinates = line(o.arcs); break;
+      case "MultiLineString": coordinates = o.arcs.map(line); break;
+      case "Polygon": coordinates = polygon(o.arcs); break;
+      case "MultiPolygon": coordinates = o.arcs.map(polygon); break;
+      default: return null;
+    }
+    return {type: type, coordinates: coordinates};
+  }
+
+  return geometry(o);
+}
+
+var stitch = function(topology, arcs) {
+  var stitchedArcs = {},
+      fragmentByStart = {},
+      fragmentByEnd = {},
+      fragments = [],
+      emptyIndex = -1;
+
+  // Stitch empty arcs first, since they may be subsumed by other arcs.
+  arcs.forEach(function(i, j) {
+    var arc = topology.arcs[i < 0 ? ~i : i], t;
+    if (arc.length < 3 && !arc[1][0] && !arc[1][1]) {
+      t = arcs[++emptyIndex], arcs[emptyIndex] = i, arcs[j] = t;
+    }
+  });
+
+  arcs.forEach(function(i) {
+    var e = ends(i),
+        start = e[0],
+        end = e[1],
+        f, g;
+
+    if (f = fragmentByEnd[start]) {
+      delete fragmentByEnd[f.end];
+      f.push(i);
+      f.end = end;
+      if (g = fragmentByStart[end]) {
+        delete fragmentByStart[g.start];
+        var fg = g === f ? f : f.concat(g);
+        fragmentByStart[fg.start = f.start] = fragmentByEnd[fg.end = g.end] = fg;
+      } else {
+        fragmentByStart[f.start] = fragmentByEnd[f.end] = f;
+      }
+    } else if (f = fragmentByStart[end]) {
+      delete fragmentByStart[f.start];
+      f.unshift(i);
+      f.start = start;
+      if (g = fragmentByEnd[start]) {
+        delete fragmentByEnd[g.end];
+        var gf = g === f ? f : g.concat(f);
+        fragmentByStart[gf.start = g.start] = fragmentByEnd[gf.end = f.end] = gf;
+      } else {
+        fragmentByStart[f.start] = fragmentByEnd[f.end] = f;
+      }
+    } else {
+      f = [i];
+      fragmentByStart[f.start = start] = fragmentByEnd[f.end = end] = f;
+    }
+  });
+
+  function ends(i) {
+    var arc = topology.arcs[i < 0 ? ~i : i], p0 = arc[0], p1;
+    if (topology.transform) p1 = [0, 0], arc.forEach(function(dp) { p1[0] += dp[0], p1[1] += dp[1]; });
+    else p1 = arc[arc.length - 1];
+    return i < 0 ? [p1, p0] : [p0, p1];
+  }
+
+  function flush(fragmentByEnd, fragmentByStart) {
+    for (var k in fragmentByEnd) {
+      var f = fragmentByEnd[k];
+      delete fragmentByStart[f.start];
+      delete f.start;
+      delete f.end;
+      f.forEach(function(i) { stitchedArcs[i < 0 ? ~i : i] = 1; });
+      fragments.push(f);
+    }
+  }
+
+  flush(fragmentByEnd, fragmentByStart);
+  flush(fragmentByStart, fragmentByEnd);
+  arcs.forEach(function(i) { if (!stitchedArcs[i < 0 ? ~i : i]) fragments.push([i]); });
+
+  return fragments;
+};
+
+var mesh = function(topology) {
+  return object(topology, meshArcs.apply(this, arguments));
+};
+
+function meshArcs(topology, object$$1, filter) {
+  var arcs, i, n;
+  if (arguments.length > 1) arcs = extractArcs(topology, object$$1, filter);
+  else for (i = 0, arcs = new Array(n = topology.arcs.length); i < n; ++i) arcs[i] = i;
+  return {type: "MultiLineString", arcs: stitch(topology, arcs)};
+}
+
+function extractArcs(topology, object$$1, filter) {
+  var arcs = [],
+      geomsByArc = [],
+      geom;
+
+  function extract0(i) {
+    var j = i < 0 ? ~i : i;
+    (geomsByArc[j] || (geomsByArc[j] = [])).push({i: i, g: geom});
+  }
+
+  function extract1(arcs) {
+    arcs.forEach(extract0);
+  }
+
+  function extract2(arcs) {
+    arcs.forEach(extract1);
+  }
+
+  function extract3(arcs) {
+    arcs.forEach(extract2);
+  }
+
+  function geometry(o) {
+    switch (geom = o, o.type) {
+      case "GeometryCollection": o.geometries.forEach(geometry); break;
+      case "LineString": extract1(o.arcs); break;
+      case "MultiLineString": case "Polygon": extract2(o.arcs); break;
+      case "MultiPolygon": extract3(o.arcs); break;
+    }
+  }
+
+  geometry(object$$1);
+
+  geomsByArc.forEach(filter == null
+      ? function(geoms) { arcs.push(geoms[0].i); }
+      : function(geoms) { if (filter(geoms[0].g, geoms[geoms.length - 1].g)) arcs.push(geoms[0].i); });
+
+  return arcs;
+}
+
+function planarRingArea(ring) {
+  var i = -1, n = ring.length, a, b = ring[n - 1], area = 0;
+  while (++i < n) a = b, b = ring[i], area += a[0] * b[1] - a[1] * b[0];
+  return Math.abs(area); // Note: doubled area!
+}
+
+var merge = function(topology) {
+  return object(topology, mergeArcs.apply(this, arguments));
+};
+
+function mergeArcs(topology, objects) {
+  var polygonsByArc = {},
+      polygons = [],
+      groups = [];
+
+  objects.forEach(geometry);
+
+  function geometry(o) {
+    switch (o.type) {
+      case "GeometryCollection": o.geometries.forEach(geometry); break;
+      case "Polygon": extract(o.arcs); break;
+      case "MultiPolygon": o.arcs.forEach(extract); break;
+    }
+  }
+
+  function extract(polygon) {
+    polygon.forEach(function(ring) {
+      ring.forEach(function(arc) {
+        (polygonsByArc[arc = arc < 0 ? ~arc : arc] || (polygonsByArc[arc] = [])).push(polygon);
+      });
+    });
+    polygons.push(polygon);
+  }
+
+  function area(ring) {
+    return planarRingArea(object(topology, {type: "Polygon", arcs: [ring]}).coordinates[0]);
+  }
+
+  polygons.forEach(function(polygon) {
+    if (!polygon._) {
+      var group = [],
+          neighbors = [polygon];
+      polygon._ = 1;
+      groups.push(group);
+      while (polygon = neighbors.pop()) {
+        group.push(polygon);
+        polygon.forEach(function(ring) {
+          ring.forEach(function(arc) {
+            polygonsByArc[arc < 0 ? ~arc : arc].forEach(function(polygon) {
+              if (!polygon._) {
+                polygon._ = 1;
+                neighbors.push(polygon);
+              }
+            });
+          });
+        });
+      }
+    }
+  });
+
+  polygons.forEach(function(polygon) {
+    delete polygon._;
+  });
+
+  return {
+    type: "MultiPolygon",
+    arcs: groups.map(function(polygons) {
+      var arcs = [], n;
+
+      // Extract the exterior (unique) arcs.
+      polygons.forEach(function(polygon) {
+        polygon.forEach(function(ring) {
+          ring.forEach(function(arc) {
+            if (polygonsByArc[arc < 0 ? ~arc : arc].length < 2) {
+              arcs.push(arc);
+            }
+          });
+        });
+      });
+
+      // Stitch the arcs into one or more rings.
+      arcs = stitch(topology, arcs);
+
+      // If more than one ring is returned,
+      // at most one of these rings can be the exterior;
+      // choose the one with the greatest absolute area.
+      if ((n = arcs.length) > 1) {
+        for (var i = 1, k = area(arcs[0]), ki, t; i < n; ++i) {
+          if ((ki = area(arcs[i])) > k) {
+            t = arcs[0], arcs[0] = arcs[i], arcs[i] = t, k = ki;
+          }
+        }
+      }
+
+      return arcs;
+    })
+  };
+}
+
+var bisect = function(a, x) {
+  var lo = 0, hi = a.length;
+  while (lo < hi) {
+    var mid = lo + hi >>> 1;
+    if (a[mid] < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+};
+
+var neighbors = function(objects) {
+  var indexesByArc = {}, // arc index -> array of object indexes
+      neighbors = objects.map(function() { return []; });
+
+  function line(arcs, i) {
+    arcs.forEach(function(a) {
+      if (a < 0) a = ~a;
+      var o = indexesByArc[a];
+      if (o) o.push(i);
+      else indexesByArc[a] = [i];
+    });
+  }
+
+  function polygon(arcs, i) {
+    arcs.forEach(function(arc) { line(arc, i); });
+  }
+
+  function geometry(o, i) {
+    if (o.type === "GeometryCollection") o.geometries.forEach(function(o) { geometry(o, i); });
+    else if (o.type in geometryType) geometryType[o.type](o.arcs, i);
+  }
+
+  var geometryType = {
+    LineString: line,
+    MultiLineString: polygon,
+    Polygon: polygon,
+    MultiPolygon: function(arcs, i) { arcs.forEach(function(arc) { polygon(arc, i); }); }
+  };
+
+  objects.forEach(geometry);
+
+  for (var i in indexesByArc) {
+    for (var indexes = indexesByArc[i], m = indexes.length, j = 0; j < m; ++j) {
+      for (var k = j + 1; k < m; ++k) {
+        var ij = indexes[j], ik = indexes[k], n;
+        if ((n = neighbors[ij])[i = bisect(n, ik)] !== ik) n.splice(i, 0, ik);
+        if ((n = neighbors[ik])[i = bisect(n, ij)] !== ij) n.splice(i, 0, ij);
+      }
+    }
+  }
+
+  return neighbors;
+};
+
+var untransform = function(transform) {
+  if (transform == null) return identity;
+  var x0,
+      y0,
+      kx = transform.scale[0],
+      ky = transform.scale[1],
+      dx = transform.translate[0],
+      dy = transform.translate[1];
+  return function(input, i) {
+    if (!i) x0 = y0 = 0;
+    var j = 2,
+        n = input.length,
+        output = new Array(n),
+        x1 = Math.round((input[0] - dx) / kx),
+        y1 = Math.round((input[1] - dy) / ky);
+    output[0] = x1 - x0, x0 = x1;
+    output[1] = y1 - y0, y0 = y1;
+    while (j < n) output[j] = input[j], ++j;
+    return output;
+  };
+};
+
+var quantize = function(topology, transform) {
+  if (topology.transform) throw new Error("already quantized");
+
+  if (!transform || !transform.scale) {
+    if (!((n = Math.floor(transform)) >= 2)) throw new Error("n must be ≥2");
+    box = topology.bbox || bbox(topology);
+    var x0 = box[0], y0 = box[1], x1 = box[2], y1 = box[3], n;
+    transform = {scale: [x1 - x0 ? (x1 - x0) / (n - 1) : 1, y1 - y0 ? (y1 - y0) / (n - 1) : 1], translate: [x0, y0]};
+  } else {
+    box = topology.bbox;
+  }
+
+  var t = untransform(transform), box, key, inputs = topology.objects, outputs = {};
+
+  function quantizePoint(point) {
+    return t(point);
+  }
+
+  function quantizeGeometry(input) {
+    var output;
+    switch (input.type) {
+      case "GeometryCollection": output = {type: "GeometryCollection", geometries: input.geometries.map(quantizeGeometry)}; break;
+      case "Point": output = {type: "Point", coordinates: quantizePoint(input.coordinates)}; break;
+      case "MultiPoint": output = {type: "MultiPoint", coordinates: input.coordinates.map(quantizePoint)}; break;
+      default: return input;
+    }
+    if (input.id != null) output.id = input.id;
+    if (input.bbox != null) output.bbox = input.bbox;
+    if (input.properties != null) output.properties = input.properties;
+    return output;
+  }
+
+  function quantizeArc(input) {
+    var i = 0, j = 1, n = input.length, p, output = new Array(n); // pessimistic
+    output[0] = t(input[0], 0);
+    while (++i < n) if ((p = t(input[i], i))[0] || p[1]) output[j++] = p; // non-coincident points
+    if (j === 1) output[j++] = [0, 0]; // an arc must have at least two points
+    output.length = j;
+    return output;
+  }
+
+  for (key in inputs) outputs[key] = quantizeGeometry(inputs[key]);
+
+  return {
+    type: "Topology",
+    bbox: box,
+    transform: transform,
+    objects: outputs,
+    arcs: topology.arcs.map(quantizeArc)
+  };
+};
+
+exports.bbox = bbox;
+exports.feature = feature;
+exports.mesh = mesh;
+exports.meshArcs = meshArcs;
+exports.merge = merge;
+exports.mergeArcs = mergeArcs;
+exports.neighbors = neighbors;
+exports.quantize = quantize;
+exports.transform = transform;
+exports.untransform = untransform;
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+})));
+
+},{}],13:[function(require,module,exports){
+// https://github.com/topojson/topojson-server Version 3.0.0. Copyright 2017 Mike Bostock.
+(function (global, factory) {
+	typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
+	typeof define === 'function' && define.amd ? define(['exports'], factory) :
+	(factory((global.topojson = global.topojson || {})));
+}(this, (function (exports) { 'use strict';
+
+// Computes the bounding box of the specified hash of GeoJSON objects.
+var bounds = function(objects) {
+  var x0 = Infinity,
+      y0 = Infinity,
+      x1 = -Infinity,
+      y1 = -Infinity;
+
+  function boundGeometry(geometry) {
+    if (geometry != null && boundGeometryType.hasOwnProperty(geometry.type)) boundGeometryType[geometry.type](geometry);
+  }
+
+  var boundGeometryType = {
+    GeometryCollection: function(o) { o.geometries.forEach(boundGeometry); },
+    Point: function(o) { boundPoint(o.coordinates); },
+    MultiPoint: function(o) { o.coordinates.forEach(boundPoint); },
+    LineString: function(o) { boundLine(o.arcs); },
+    MultiLineString: function(o) { o.arcs.forEach(boundLine); },
+    Polygon: function(o) { o.arcs.forEach(boundLine); },
+    MultiPolygon: function(o) { o.arcs.forEach(boundMultiLine); }
+  };
+
+  function boundPoint(coordinates) {
+    var x = coordinates[0],
+        y = coordinates[1];
+    if (x < x0) x0 = x;
+    if (x > x1) x1 = x;
+    if (y < y0) y0 = y;
+    if (y > y1) y1 = y;
+  }
+
+  function boundLine(coordinates) {
+    coordinates.forEach(boundPoint);
+  }
+
+  function boundMultiLine(coordinates) {
+    coordinates.forEach(boundLine);
+  }
+
+  for (var key in objects) {
+    boundGeometry(objects[key]);
+  }
+
+  return x1 >= x0 && y1 >= y0 ? [x0, y0, x1, y1] : undefined;
+};
+
+var hashset = function(size, hash, equal, type, empty) {
+  if (arguments.length === 3) {
+    type = Array;
+    empty = null;
+  }
+
+  var store = new type(size = 1 << Math.max(4, Math.ceil(Math.log(size) / Math.LN2))),
+      mask = size - 1;
+
+  for (var i = 0; i < size; ++i) {
+    store[i] = empty;
+  }
+
+  function add(value) {
+    var index = hash(value) & mask,
+        match = store[index],
+        collisions = 0;
+    while (match != empty) {
+      if (equal(match, value)) return true;
+      if (++collisions >= size) throw new Error("full hashset");
+      match = store[index = (index + 1) & mask];
+    }
+    store[index] = value;
+    return true;
+  }
+
+  function has(value) {
+    var index = hash(value) & mask,
+        match = store[index],
+        collisions = 0;
+    while (match != empty) {
+      if (equal(match, value)) return true;
+      if (++collisions >= size) break;
+      match = store[index = (index + 1) & mask];
+    }
+    return false;
+  }
+
+  function values() {
+    var values = [];
+    for (var i = 0, n = store.length; i < n; ++i) {
+      var match = store[i];
+      if (match != empty) values.push(match);
+    }
+    return values;
+  }
+
+  return {
+    add: add,
+    has: has,
+    values: values
+  };
+};
+
+var hashmap = function(size, hash, equal, keyType, keyEmpty, valueType) {
+  if (arguments.length === 3) {
+    keyType = valueType = Array;
+    keyEmpty = null;
+  }
+
+  var keystore = new keyType(size = 1 << Math.max(4, Math.ceil(Math.log(size) / Math.LN2))),
+      valstore = new valueType(size),
+      mask = size - 1;
+
+  for (var i = 0; i < size; ++i) {
+    keystore[i] = keyEmpty;
+  }
+
+  function set(key, value) {
+    var index = hash(key) & mask,
+        matchKey = keystore[index],
+        collisions = 0;
+    while (matchKey != keyEmpty) {
+      if (equal(matchKey, key)) return valstore[index] = value;
+      if (++collisions >= size) throw new Error("full hashmap");
+      matchKey = keystore[index = (index + 1) & mask];
+    }
+    keystore[index] = key;
+    valstore[index] = value;
+    return value;
+  }
+
+  function maybeSet(key, value) {
+    var index = hash(key) & mask,
+        matchKey = keystore[index],
+        collisions = 0;
+    while (matchKey != keyEmpty) {
+      if (equal(matchKey, key)) return valstore[index];
+      if (++collisions >= size) throw new Error("full hashmap");
+      matchKey = keystore[index = (index + 1) & mask];
+    }
+    keystore[index] = key;
+    valstore[index] = value;
+    return value;
+  }
+
+  function get(key, missingValue) {
+    var index = hash(key) & mask,
+        matchKey = keystore[index],
+        collisions = 0;
+    while (matchKey != keyEmpty) {
+      if (equal(matchKey, key)) return valstore[index];
+      if (++collisions >= size) break;
+      matchKey = keystore[index = (index + 1) & mask];
+    }
+    return missingValue;
+  }
+
+  function keys() {
+    var keys = [];
+    for (var i = 0, n = keystore.length; i < n; ++i) {
+      var matchKey = keystore[i];
+      if (matchKey != keyEmpty) keys.push(matchKey);
+    }
+    return keys;
+  }
+
+  return {
+    set: set,
+    maybeSet: maybeSet, // set if unset
+    get: get,
+    keys: keys
+  };
+};
+
+var equalPoint = function(pointA, pointB) {
+  return pointA[0] === pointB[0] && pointA[1] === pointB[1];
+};
+
+// TODO if quantized, use simpler Int32 hashing?
+
+var buffer = new ArrayBuffer(16);
+var floats = new Float64Array(buffer);
+var uints = new Uint32Array(buffer);
+
+var hashPoint = function(point) {
+  floats[0] = point[0];
+  floats[1] = point[1];
+  var hash = uints[0] ^ uints[1];
+  hash = hash << 5 ^ hash >> 7 ^ uints[2] ^ uints[3];
+  return hash & 0x7fffffff;
+};
+
+// Given an extracted (pre-)topology, identifies all of the junctions. These are
+// the points at which arcs (lines or rings) will need to be cut so that each
+// arc is represented uniquely.
+//
+// A junction is a point where at least one arc deviates from another arc going
+// through the same point. For example, consider the point B. If there is a arc
+// through ABC and another arc through CBA, then B is not a junction because in
+// both cases the adjacent point pairs are {A,C}. However, if there is an
+// additional arc ABD, then {A,D} != {A,C}, and thus B becomes a junction.
+//
+// For a closed ring ABCA, the first point A’s adjacent points are the second
+// and last point {B,C}. For a line, the first and last point are always
+// considered junctions, even if the line is closed; this ensures that a closed
+// line is never rotated.
+var join = function(topology) {
+  var coordinates = topology.coordinates,
+      lines = topology.lines,
+      rings = topology.rings,
+      indexes = index(),
+      visitedByIndex = new Int32Array(coordinates.length),
+      leftByIndex = new Int32Array(coordinates.length),
+      rightByIndex = new Int32Array(coordinates.length),
+      junctionByIndex = new Int8Array(coordinates.length),
+      junctionCount = 0, // upper bound on number of junctions
+      i, n,
+      previousIndex,
+      currentIndex,
+      nextIndex;
+
+  for (i = 0, n = coordinates.length; i < n; ++i) {
+    visitedByIndex[i] = leftByIndex[i] = rightByIndex[i] = -1;
+  }
+
+  for (i = 0, n = lines.length; i < n; ++i) {
+    var line = lines[i],
+        lineStart = line[0],
+        lineEnd = line[1];
+    currentIndex = indexes[lineStart];
+    nextIndex = indexes[++lineStart];
+    ++junctionCount, junctionByIndex[currentIndex] = 1; // start
+    while (++lineStart <= lineEnd) {
+      sequence(i, previousIndex = currentIndex, currentIndex = nextIndex, nextIndex = indexes[lineStart]);
+    }
+    ++junctionCount, junctionByIndex[nextIndex] = 1; // end
+  }
+
+  for (i = 0, n = coordinates.length; i < n; ++i) {
+    visitedByIndex[i] = -1;
+  }
+
+  for (i = 0, n = rings.length; i < n; ++i) {
+    var ring = rings[i],
+        ringStart = ring[0] + 1,
+        ringEnd = ring[1];
+    previousIndex = indexes[ringEnd - 1];
+    currentIndex = indexes[ringStart - 1];
+    nextIndex = indexes[ringStart];
+    sequence(i, previousIndex, currentIndex, nextIndex);
+    while (++ringStart <= ringEnd) {
+      sequence(i, previousIndex = currentIndex, currentIndex = nextIndex, nextIndex = indexes[ringStart]);
+    }
+  }
+
+  function sequence(i, previousIndex, currentIndex, nextIndex) {
+    if (visitedByIndex[currentIndex] === i) return; // ignore self-intersection
+    visitedByIndex[currentIndex] = i;
+    var leftIndex = leftByIndex[currentIndex];
+    if (leftIndex >= 0) {
+      var rightIndex = rightByIndex[currentIndex];
+      if ((leftIndex !== previousIndex || rightIndex !== nextIndex)
+        && (leftIndex !== nextIndex || rightIndex !== previousIndex)) {
+        ++junctionCount, junctionByIndex[currentIndex] = 1;
+      }
+    } else {
+      leftByIndex[currentIndex] = previousIndex;
+      rightByIndex[currentIndex] = nextIndex;
+    }
+  }
+
+  function index() {
+    var indexByPoint = hashmap(coordinates.length * 1.4, hashIndex, equalIndex, Int32Array, -1, Int32Array),
+        indexes = new Int32Array(coordinates.length);
+
+    for (var i = 0, n = coordinates.length; i < n; ++i) {
+      indexes[i] = indexByPoint.maybeSet(i, i);
+    }
+
+    return indexes;
+  }
+
+  function hashIndex(i) {
+    return hashPoint(coordinates[i]);
+  }
+
+  function equalIndex(i, j) {
+    return equalPoint(coordinates[i], coordinates[j]);
+  }
+
+  visitedByIndex = leftByIndex = rightByIndex = null;
+
+  var junctionByPoint = hashset(junctionCount * 1.4, hashPoint, equalPoint), j;
+
+  // Convert back to a standard hashset by point for caller convenience.
+  for (i = 0, n = coordinates.length; i < n; ++i) {
+    if (junctionByIndex[j = indexes[i]]) {
+      junctionByPoint.add(coordinates[j]);
+    }
+  }
+
+  return junctionByPoint;
+};
+
+// Given an extracted (pre-)topology, cuts (or rotates) arcs so that all shared
+// point sequences are identified. The topology can then be subsequently deduped
+// to remove exact duplicate arcs.
+var cut = function(topology) {
+  var junctions = join(topology),
+      coordinates = topology.coordinates,
+      lines = topology.lines,
+      rings = topology.rings,
+      next,
+      i, n;
+
+  for (i = 0, n = lines.length; i < n; ++i) {
+    var line = lines[i],
+        lineMid = line[0],
+        lineEnd = line[1];
+    while (++lineMid < lineEnd) {
+      if (junctions.has(coordinates[lineMid])) {
+        next = {0: lineMid, 1: line[1]};
+        line[1] = lineMid;
+        line = line.next = next;
+      }
+    }
+  }
+
+  for (i = 0, n = rings.length; i < n; ++i) {
+    var ring = rings[i],
+        ringStart = ring[0],
+        ringMid = ringStart,
+        ringEnd = ring[1],
+        ringFixed = junctions.has(coordinates[ringStart]);
+    while (++ringMid < ringEnd) {
+      if (junctions.has(coordinates[ringMid])) {
+        if (ringFixed) {
+          next = {0: ringMid, 1: ring[1]};
+          ring[1] = ringMid;
+          ring = ring.next = next;
+        } else { // For the first junction, we can rotate rather than cut.
+          rotateArray(coordinates, ringStart, ringEnd, ringEnd - ringMid);
+          coordinates[ringEnd] = coordinates[ringStart];
+          ringFixed = true;
+          ringMid = ringStart; // restart; we may have skipped junctions
+        }
+      }
+    }
+  }
+
+  return topology;
+};
+
+function rotateArray(array, start, end, offset) {
+  reverse(array, start, end);
+  reverse(array, start, start + offset);
+  reverse(array, start + offset, end);
+}
+
+function reverse(array, start, end) {
+  for (var mid = start + ((end-- - start) >> 1), t; start < mid; ++start, --end) {
+    t = array[start], array[start] = array[end], array[end] = t;
+  }
+}
+
+// Given a cut topology, combines duplicate arcs.
+var dedup = function(topology) {
+  var coordinates = topology.coordinates,
+      lines = topology.lines, line,
+      rings = topology.rings, ring,
+      arcCount = lines.length + rings.length,
+      i, n;
+
+  delete topology.lines;
+  delete topology.rings;
+
+  // Count the number of (non-unique) arcs to initialize the hashmap safely.
+  for (i = 0, n = lines.length; i < n; ++i) {
+    line = lines[i]; while (line = line.next) ++arcCount;
+  }
+  for (i = 0, n = rings.length; i < n; ++i) {
+    ring = rings[i]; while (ring = ring.next) ++arcCount;
+  }
+
+  var arcsByEnd = hashmap(arcCount * 2 * 1.4, hashPoint, equalPoint),
+      arcs = topology.arcs = [];
+
+  for (i = 0, n = lines.length; i < n; ++i) {
+    line = lines[i];
+    do {
+      dedupLine(line);
+    } while (line = line.next);
+  }
+
+  for (i = 0, n = rings.length; i < n; ++i) {
+    ring = rings[i];
+    if (ring.next) { // arc is no longer closed
+      do {
+        dedupLine(ring);
+      } while (ring = ring.next);
+    } else {
+      dedupRing(ring);
+    }
+  }
+
+  function dedupLine(arc) {
+    var startPoint,
+        endPoint,
+        startArcs, startArc,
+        endArcs, endArc,
+        i, n;
+
+    // Does this arc match an existing arc in order?
+    if (startArcs = arcsByEnd.get(startPoint = coordinates[arc[0]])) {
+      for (i = 0, n = startArcs.length; i < n; ++i) {
+        startArc = startArcs[i];
+        if (equalLine(startArc, arc)) {
+          arc[0] = startArc[0];
+          arc[1] = startArc[1];
+          return;
+        }
+      }
+    }
+
+    // Does this arc match an existing arc in reverse order?
+    if (endArcs = arcsByEnd.get(endPoint = coordinates[arc[1]])) {
+      for (i = 0, n = endArcs.length; i < n; ++i) {
+        endArc = endArcs[i];
+        if (reverseEqualLine(endArc, arc)) {
+          arc[1] = endArc[0];
+          arc[0] = endArc[1];
+          return;
+        }
+      }
+    }
+
+    if (startArcs) startArcs.push(arc); else arcsByEnd.set(startPoint, [arc]);
+    if (endArcs) endArcs.push(arc); else arcsByEnd.set(endPoint, [arc]);
+    arcs.push(arc);
+  }
+
+  function dedupRing(arc) {
+    var endPoint,
+        endArcs,
+        endArc,
+        i, n;
+
+    // Does this arc match an existing line in order, or reverse order?
+    // Rings are closed, so their start point and end point is the same.
+    if (endArcs = arcsByEnd.get(endPoint = coordinates[arc[0]])) {
+      for (i = 0, n = endArcs.length; i < n; ++i) {
+        endArc = endArcs[i];
+        if (equalRing(endArc, arc)) {
+          arc[0] = endArc[0];
+          arc[1] = endArc[1];
+          return;
+        }
+        if (reverseEqualRing(endArc, arc)) {
+          arc[0] = endArc[1];
+          arc[1] = endArc[0];
+          return;
+        }
+      }
+    }
+
+    // Otherwise, does this arc match an existing ring in order, or reverse order?
+    if (endArcs = arcsByEnd.get(endPoint = coordinates[arc[0] + findMinimumOffset(arc)])) {
+      for (i = 0, n = endArcs.length; i < n; ++i) {
+        endArc = endArcs[i];
+        if (equalRing(endArc, arc)) {
+          arc[0] = endArc[0];
+          arc[1] = endArc[1];
+          return;
+        }
+        if (reverseEqualRing(endArc, arc)) {
+          arc[0] = endArc[1];
+          arc[1] = endArc[0];
+          return;
+        }
+      }
+    }
+
+    if (endArcs) endArcs.push(arc); else arcsByEnd.set(endPoint, [arc]);
+    arcs.push(arc);
+  }
+
+  function equalLine(arcA, arcB) {
+    var ia = arcA[0], ib = arcB[0],
+        ja = arcA[1], jb = arcB[1];
+    if (ia - ja !== ib - jb) return false;
+    for (; ia <= ja; ++ia, ++ib) if (!equalPoint(coordinates[ia], coordinates[ib])) return false;
+    return true;
+  }
+
+  function reverseEqualLine(arcA, arcB) {
+    var ia = arcA[0], ib = arcB[0],
+        ja = arcA[1], jb = arcB[1];
+    if (ia - ja !== ib - jb) return false;
+    for (; ia <= ja; ++ia, --jb) if (!equalPoint(coordinates[ia], coordinates[jb])) return false;
+    return true;
+  }
+
+  function equalRing(arcA, arcB) {
+    var ia = arcA[0], ib = arcB[0],
+        ja = arcA[1], jb = arcB[1],
+        n = ja - ia;
+    if (n !== jb - ib) return false;
+    var ka = findMinimumOffset(arcA),
+        kb = findMinimumOffset(arcB);
+    for (var i = 0; i < n; ++i) {
+      if (!equalPoint(coordinates[ia + (i + ka) % n], coordinates[ib + (i + kb) % n])) return false;
+    }
+    return true;
+  }
+
+  function reverseEqualRing(arcA, arcB) {
+    var ia = arcA[0], ib = arcB[0],
+        ja = arcA[1], jb = arcB[1],
+        n = ja - ia;
+    if (n !== jb - ib) return false;
+    var ka = findMinimumOffset(arcA),
+        kb = n - findMinimumOffset(arcB);
+    for (var i = 0; i < n; ++i) {
+      if (!equalPoint(coordinates[ia + (i + ka) % n], coordinates[jb - (i + kb) % n])) return false;
+    }
+    return true;
+  }
+
+  // Rings are rotated to a consistent, but arbitrary, start point.
+  // This is necessary to detect when a ring and a rotated copy are dupes.
+  function findMinimumOffset(arc) {
+    var start = arc[0],
+        end = arc[1],
+        mid = start,
+        minimum = mid,
+        minimumPoint = coordinates[mid];
+    while (++mid < end) {
+      var point = coordinates[mid];
+      if (point[0] < minimumPoint[0] || point[0] === minimumPoint[0] && point[1] < minimumPoint[1]) {
+        minimum = mid;
+        minimumPoint = point;
+      }
+    }
+    return minimum - start;
+  }
+
+  return topology;
+};
+
+// Given an array of arcs in absolute (but already quantized!) coordinates,
+// converts to fixed-point delta encoding.
+// This is a destructive operation that modifies the given arcs!
+var delta = function(arcs) {
+  var i = -1,
+      n = arcs.length;
+
+  while (++i < n) {
+    var arc = arcs[i],
+        j = 0,
+        k = 1,
+        m = arc.length,
+        point = arc[0],
+        x0 = point[0],
+        y0 = point[1],
+        x1,
+        y1;
+
+    while (++j < m) {
+      point = arc[j], x1 = point[0], y1 = point[1];
+      if (x1 !== x0 || y1 !== y0) arc[k++] = [x1 - x0, y1 - y0], x0 = x1, y0 = y1;
+    }
+
+    if (k === 1) arc[k++] = [0, 0]; // Each arc must be an array of two or more positions.
+
+    arc.length = k;
+  }
+
+  return arcs;
+};
+
+// Extracts the lines and rings from the specified hash of geometry objects.
+//
+// Returns an object with three properties:
+//
+// * coordinates - shared buffer of [x, y] coordinates
+// * lines - lines extracted from the hash, of the form [start, end]
+// * rings - rings extracted from the hash, of the form [start, end]
+//
+// For each ring or line, start and end represent inclusive indexes into the
+// coordinates buffer. For rings (and closed lines), coordinates[start] equals
+// coordinates[end].
+//
+// For each line or polygon geometry in the input hash, including nested
+// geometries as in geometry collections, the `coordinates` array is replaced
+// with an equivalent `arcs` array that, for each line (for line string
+// geometries) or ring (for polygon geometries), points to one of the above
+// lines or rings.
+var extract = function(objects) {
+  var index = -1,
+      lines = [],
+      rings = [],
+      coordinates = [];
+
+  function extractGeometry(geometry) {
+    if (geometry && extractGeometryType.hasOwnProperty(geometry.type)) extractGeometryType[geometry.type](geometry);
+  }
+
+  var extractGeometryType = {
+    GeometryCollection: function(o) { o.geometries.forEach(extractGeometry); },
+    LineString: function(o) { o.arcs = extractLine(o.arcs); },
+    MultiLineString: function(o) { o.arcs = o.arcs.map(extractLine); },
+    Polygon: function(o) { o.arcs = o.arcs.map(extractRing); },
+    MultiPolygon: function(o) { o.arcs = o.arcs.map(extractMultiRing); }
+  };
+
+  function extractLine(line) {
+    for (var i = 0, n = line.length; i < n; ++i) coordinates[++index] = line[i];
+    var arc = {0: index - n + 1, 1: index};
+    lines.push(arc);
+    return arc;
+  }
+
+  function extractRing(ring) {
+    for (var i = 0, n = ring.length; i < n; ++i) coordinates[++index] = ring[i];
+    var arc = {0: index - n + 1, 1: index};
+    rings.push(arc);
+    return arc;
+  }
+
+  function extractMultiRing(rings) {
+    return rings.map(extractRing);
+  }
+
+  for (var key in objects) {
+    extractGeometry(objects[key]);
+  }
+
+  return {
+    type: "Topology",
+    coordinates: coordinates,
+    lines: lines,
+    rings: rings,
+    objects: objects
+  };
+};
+
+// Given a hash of GeoJSON objects, returns a hash of GeoJSON geometry objects.
+// Any null input geometry objects are represented as {type: null} in the output.
+// Any feature.{id,properties,bbox} are transferred to the output geometry object.
+// Each output geometry object is a shallow copy of the input (e.g., properties, coordinates)!
+var geometry = function(inputs) {
+  var outputs = {}, key;
+  for (key in inputs) outputs[key] = geomifyObject(inputs[key]);
+  return outputs;
+};
+
+function geomifyObject(input) {
+  return input == null ? {type: null}
+      : (input.type === "FeatureCollection" ? geomifyFeatureCollection
+      : input.type === "Feature" ? geomifyFeature
+      : geomifyGeometry)(input);
+}
+
+function geomifyFeatureCollection(input) {
+  var output = {type: "GeometryCollection", geometries: input.features.map(geomifyFeature)};
+  if (input.bbox != null) output.bbox = input.bbox;
+  return output;
+}
+
+function geomifyFeature(input) {
+  var output = geomifyGeometry(input.geometry), key; // eslint-disable-line no-unused-vars
+  if (input.id != null) output.id = input.id;
+  if (input.bbox != null) output.bbox = input.bbox;
+  for (key in input.properties) { output.properties = input.properties; break; }
+  return output;
+}
+
+function geomifyGeometry(input) {
+  if (input == null) return {type: null};
+  var output = input.type === "GeometryCollection" ? {type: "GeometryCollection", geometries: input.geometries.map(geomifyGeometry)}
+      : input.type === "Point" || input.type === "MultiPoint" ? {type: input.type, coordinates: input.coordinates}
+      : {type: input.type, arcs: input.coordinates}; // TODO Check for unknown types?
+  if (input.bbox != null) output.bbox = input.bbox;
+  return output;
+}
+
+var prequantize = function(objects, bbox, n) {
+  var x0 = bbox[0],
+      y0 = bbox[1],
+      x1 = bbox[2],
+      y1 = bbox[3],
+      kx = x1 - x0 ? (n - 1) / (x1 - x0) : 1,
+      ky = y1 - y0 ? (n - 1) / (y1 - y0) : 1;
+
+  function quantizePoint(input) {
+    return [Math.round((input[0] - x0) * kx), Math.round((input[1] - y0) * ky)];
+  }
+
+  function quantizePoints(input, m) {
+    var i = -1,
+        j = 0,
+        n = input.length,
+        output = new Array(n), // pessimistic
+        pi,
+        px,
+        py,
+        x,
+        y;
+
+    while (++i < n) {
+      pi = input[i];
+      x = Math.round((pi[0] - x0) * kx);
+      y = Math.round((pi[1] - y0) * ky);
+      if (x !== px || y !== py) output[j++] = [px = x, py = y]; // non-coincident points
+    }
+
+    output.length = j;
+    while (j < m) j = output.push([output[0][0], output[0][1]]);
+    return output;
+  }
+
+  function quantizeLine(input) {
+    return quantizePoints(input, 2);
+  }
+
+  function quantizeRing(input) {
+    return quantizePoints(input, 4);
+  }
+
+  function quantizePolygon(input) {
+    return input.map(quantizeRing);
+  }
+
+  function quantizeGeometry(o) {
+    if (o != null && quantizeGeometryType.hasOwnProperty(o.type)) quantizeGeometryType[o.type](o);
+  }
+
+  var quantizeGeometryType = {
+    GeometryCollection: function(o) { o.geometries.forEach(quantizeGeometry); },
+    Point: function(o) { o.coordinates = quantizePoint(o.coordinates); },
+    MultiPoint: function(o) { o.coordinates = o.coordinates.map(quantizePoint); },
+    LineString: function(o) { o.arcs = quantizeLine(o.arcs); },
+    MultiLineString: function(o) { o.arcs = o.arcs.map(quantizeLine); },
+    Polygon: function(o) { o.arcs = quantizePolygon(o.arcs); },
+    MultiPolygon: function(o) { o.arcs = o.arcs.map(quantizePolygon); }
+  };
+
+  for (var key in objects) {
+    quantizeGeometry(objects[key]);
+  }
+
+  return {
+    scale: [1 / kx, 1 / ky],
+    translate: [x0, y0]
+  };
+};
+
+// Constructs the TopoJSON Topology for the specified hash of features.
+// Each object in the specified hash must be a GeoJSON object,
+// meaning FeatureCollection, a Feature or a geometry object.
+var topology = function(objects, quantization) {
+  var bbox = bounds(objects = geometry(objects)),
+      transform = quantization > 0 && bbox && prequantize(objects, bbox, quantization),
+      topology = dedup(cut(extract(objects))),
+      coordinates = topology.coordinates,
+      indexByArc = hashmap(topology.arcs.length * 1.4, hashArc, equalArc);
+
+  objects = topology.objects; // for garbage collection
+  topology.bbox = bbox;
+  topology.arcs = topology.arcs.map(function(arc, i) {
+    indexByArc.set(arc, i);
+    return coordinates.slice(arc[0], arc[1] + 1);
+  });
+
+  delete topology.coordinates;
+  coordinates = null;
+
+  function indexGeometry(geometry$$1) {
+    if (geometry$$1 && indexGeometryType.hasOwnProperty(geometry$$1.type)) indexGeometryType[geometry$$1.type](geometry$$1);
+  }
+
+  var indexGeometryType = {
+    GeometryCollection: function(o) { o.geometries.forEach(indexGeometry); },
+    LineString: function(o) { o.arcs = indexArcs(o.arcs); },
+    MultiLineString: function(o) { o.arcs = o.arcs.map(indexArcs); },
+    Polygon: function(o) { o.arcs = o.arcs.map(indexArcs); },
+    MultiPolygon: function(o) { o.arcs = o.arcs.map(indexMultiArcs); }
+  };
+
+  function indexArcs(arc) {
+    var indexes = [];
+    do {
+      var index = indexByArc.get(arc);
+      indexes.push(arc[0] < arc[1] ? index : ~index);
+    } while (arc = arc.next);
+    return indexes;
+  }
+
+  function indexMultiArcs(arcs) {
+    return arcs.map(indexArcs);
+  }
+
+  for (var key in objects) {
+    indexGeometry(objects[key]);
+  }
+
+  if (transform) {
+    topology.transform = transform;
+    topology.arcs = delta(topology.arcs);
+  }
+
+  return topology;
+};
+
+function hashArc(arc) {
+  var i = arc[0], j = arc[1], t;
+  if (j < i) t = i, i = j, j = t;
+  return i + 31 * j;
+}
+
+function equalArc(arcA, arcB) {
+  var ia = arcA[0], ja = arcA[1],
+      ib = arcB[0], jb = arcB[1], t;
+  if (ja < ia) t = ia, ia = ja, ja = t;
+  if (jb < ib) t = ib, ib = jb, jb = t;
+  return ia === ib && ja === jb;
+}
+
+exports.topology = topology;
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+})));
+
+},{}],14:[function(require,module,exports){
 var trim = require('./trim');
 var decap = require('./decapitalize');
 
@@ -26520,7 +28837,7 @@ module.exports = function camelize(str, decapitalize) {
   }
 };
 
-},{"./decapitalize":16,"./trim":69}],8:[function(require,module,exports){
+},{"./decapitalize":23,"./trim":76}],15:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function capitalize(str, lowercaseRest) {
@@ -26530,14 +28847,14 @@ module.exports = function capitalize(str, lowercaseRest) {
   return str.charAt(0).toUpperCase() + remainingChars;
 };
 
-},{"./helper/makeString":26}],9:[function(require,module,exports){
+},{"./helper/makeString":33}],16:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function chars(str) {
   return makeString(str).split('');
 };
 
-},{"./helper/makeString":26}],10:[function(require,module,exports){
+},{"./helper/makeString":33}],17:[function(require,module,exports){
 module.exports = function chop(str, step) {
   if (str == null) return [];
   str = String(str);
@@ -26545,7 +28862,7 @@ module.exports = function chop(str, step) {
   return step > 0 ? str.match(new RegExp('.{1,' + step + '}', 'g')) : [str];
 };
 
-},{}],11:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 var capitalize = require('./capitalize');
 var camelize = require('./camelize');
 var makeString = require('./helper/makeString');
@@ -26555,14 +28872,14 @@ module.exports = function classify(str) {
   return capitalize(camelize(str.replace(/[\W_]/g, ' ')).replace(/\s/g, ''));
 };
 
-},{"./camelize":7,"./capitalize":8,"./helper/makeString":26}],12:[function(require,module,exports){
+},{"./camelize":14,"./capitalize":15,"./helper/makeString":33}],19:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function clean(str) {
   return trim(str).replace(/\s\s+/g, ' ');
 };
 
-},{"./trim":69}],13:[function(require,module,exports){
+},{"./trim":76}],20:[function(require,module,exports){
 
 var makeString = require('./helper/makeString');
 
@@ -26586,7 +28903,7 @@ module.exports = function cleanDiacritics(str) {
   });
 };
 
-},{"./helper/makeString":26}],14:[function(require,module,exports){
+},{"./helper/makeString":33}],21:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function(str, substr) {
@@ -26598,14 +28915,14 @@ module.exports = function(str, substr) {
   return str.split(substr).length - 1;
 };
 
-},{"./helper/makeString":26}],15:[function(require,module,exports){
+},{"./helper/makeString":33}],22:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function dasherize(str) {
   return trim(str).replace(/([A-Z])/g, '-$1').replace(/[-_\s]+/g, '-').toLowerCase();
 };
 
-},{"./trim":69}],16:[function(require,module,exports){
+},{"./trim":76}],23:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function decapitalize(str) {
@@ -26613,7 +28930,7 @@ module.exports = function decapitalize(str) {
   return str.charAt(0).toLowerCase() + str.slice(1);
 };
 
-},{"./helper/makeString":26}],17:[function(require,module,exports){
+},{"./helper/makeString":33}],24:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 function getIndent(str) {
@@ -26643,7 +28960,7 @@ module.exports = function dedent(str, pattern) {
   return str.replace(reg, '');
 };
 
-},{"./helper/makeString":26}],18:[function(require,module,exports){
+},{"./helper/makeString":33}],25:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var toPositive = require('./helper/toPositive');
 
@@ -26658,7 +28975,7 @@ module.exports = function endsWith(str, ends, position) {
   return position >= 0 && str.indexOf(ends, position) === position;
 };
 
-},{"./helper/makeString":26,"./helper/toPositive":28}],19:[function(require,module,exports){
+},{"./helper/makeString":33,"./helper/toPositive":35}],26:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var escapeChars = require('./helper/escapeChars');
 
@@ -26677,7 +28994,7 @@ module.exports = function escapeHTML(str) {
   });
 };
 
-},{"./helper/escapeChars":23,"./helper/makeString":26}],20:[function(require,module,exports){
+},{"./helper/escapeChars":30,"./helper/makeString":33}],27:[function(require,module,exports){
 module.exports = function() {
   var result = {};
 
@@ -26689,7 +29006,7 @@ module.exports = function() {
   return result;
 };
 
-},{}],21:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 var makeString = require('./makeString');
 
 module.exports = function adjacent(str, direction) {
@@ -26700,7 +29017,7 @@ module.exports = function adjacent(str, direction) {
   return str.slice(0, -1) + String.fromCharCode(str.charCodeAt(str.length - 1) + direction);
 };
 
-},{"./makeString":26}],22:[function(require,module,exports){
+},{"./makeString":33}],29:[function(require,module,exports){
 var escapeRegExp = require('./escapeRegExp');
 
 module.exports = function defaultToWhiteSpace(characters) {
@@ -26712,7 +29029,7 @@ module.exports = function defaultToWhiteSpace(characters) {
     return '[' + escapeRegExp(characters) + ']';
 };
 
-},{"./escapeRegExp":24}],23:[function(require,module,exports){
+},{"./escapeRegExp":31}],30:[function(require,module,exports){
 /* We're explicitly defining the list of entities we want to escape.
 nbsp is an HTML entity, but we don't want to escape all space characters in a string, hence its omission in this map.
 
@@ -26733,14 +29050,14 @@ var escapeChars = {
 
 module.exports = escapeChars;
 
-},{}],24:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 var makeString = require('./makeString');
 
 module.exports = function escapeRegExp(str) {
   return makeString(str).replace(/([.*+?^=!:${}()|[\]\/\\])/g, '\\$1');
 };
 
-},{"./makeString":26}],25:[function(require,module,exports){
+},{"./makeString":33}],32:[function(require,module,exports){
 /*
 We're explicitly defining the list of entities that might see in escape HTML strings
 */
@@ -26761,7 +29078,7 @@ var htmlEntities = {
 
 module.exports = htmlEntities;
 
-},{}],26:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 /**
  * Ensure some object is a coerced to a string
  **/
@@ -26770,7 +29087,7 @@ module.exports = function makeString(object) {
   return '' + object;
 };
 
-},{}],27:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 module.exports = function strRepeat(str, qty){
   if (qty < 1) return '';
   var result = '';
@@ -26781,12 +29098,12 @@ module.exports = function strRepeat(str, qty){
   return result;
 };
 
-},{}],28:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 module.exports = function toPositive(number) {
   return number < 0 ? 0 : (+number || 0);
 };
 
-},{}],29:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 var capitalize = require('./capitalize');
 var underscored = require('./underscored');
 var trim = require('./trim');
@@ -26795,7 +29112,7 @@ module.exports = function humanize(str) {
   return capitalize(trim(underscored(str).replace(/_id$/, '').replace(/_/g, ' ')));
 };
 
-},{"./capitalize":8,"./trim":69,"./underscored":71}],30:[function(require,module,exports){
+},{"./capitalize":15,"./trim":76,"./underscored":78}],37:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function include(str, needle) {
@@ -26803,7 +29120,7 @@ module.exports = function include(str, needle) {
   return makeString(str).indexOf(needle) !== -1;
 };
 
-},{"./helper/makeString":26}],31:[function(require,module,exports){
+},{"./helper/makeString":33}],38:[function(require,module,exports){
 /*
 * Underscore.string
 * (c) 2010 Esa-Matti Suuronen <esa-matti aet suuronen dot org>
@@ -26948,21 +29265,21 @@ for (var method in prototypeMethods) prototype2method(prototypeMethods[method]);
 
 module.exports = s;
 
-},{"./camelize":7,"./capitalize":8,"./chars":9,"./chop":10,"./classify":11,"./clean":12,"./cleanDiacritics":13,"./count":14,"./dasherize":15,"./decapitalize":16,"./dedent":17,"./endsWith":18,"./escapeHTML":19,"./exports":20,"./helper/escapeRegExp":24,"./humanize":29,"./include":30,"./insert":32,"./isBlank":33,"./join":34,"./levenshtein":35,"./lines":36,"./lpad":37,"./lrpad":38,"./ltrim":39,"./map":40,"./naturalCmp":41,"./numberFormat":42,"./pad":43,"./pred":44,"./prune":45,"./quote":46,"./repeat":47,"./replaceAll":48,"./reverse":49,"./rpad":50,"./rtrim":51,"./slugify":52,"./splice":53,"./sprintf":54,"./startsWith":55,"./strLeft":56,"./strLeftBack":57,"./strRight":58,"./strRightBack":59,"./stripTags":60,"./succ":61,"./surround":62,"./swapCase":63,"./titleize":64,"./toBoolean":65,"./toNumber":66,"./toSentence":67,"./toSentenceSerial":68,"./trim":69,"./truncate":70,"./underscored":71,"./unescapeHTML":72,"./unquote":73,"./vsprintf":74,"./words":75,"./wrap":76}],32:[function(require,module,exports){
+},{"./camelize":14,"./capitalize":15,"./chars":16,"./chop":17,"./classify":18,"./clean":19,"./cleanDiacritics":20,"./count":21,"./dasherize":22,"./decapitalize":23,"./dedent":24,"./endsWith":25,"./escapeHTML":26,"./exports":27,"./helper/escapeRegExp":31,"./humanize":36,"./include":37,"./insert":39,"./isBlank":40,"./join":41,"./levenshtein":42,"./lines":43,"./lpad":44,"./lrpad":45,"./ltrim":46,"./map":47,"./naturalCmp":48,"./numberFormat":49,"./pad":50,"./pred":51,"./prune":52,"./quote":53,"./repeat":54,"./replaceAll":55,"./reverse":56,"./rpad":57,"./rtrim":58,"./slugify":59,"./splice":60,"./sprintf":61,"./startsWith":62,"./strLeft":63,"./strLeftBack":64,"./strRight":65,"./strRightBack":66,"./stripTags":67,"./succ":68,"./surround":69,"./swapCase":70,"./titleize":71,"./toBoolean":72,"./toNumber":73,"./toSentence":74,"./toSentenceSerial":75,"./trim":76,"./truncate":77,"./underscored":78,"./unescapeHTML":79,"./unquote":80,"./vsprintf":81,"./words":82,"./wrap":83}],39:[function(require,module,exports){
 var splice = require('./splice');
 
 module.exports = function insert(str, i, substr) {
   return splice(str, i, 0, substr);
 };
 
-},{"./splice":53}],33:[function(require,module,exports){
+},{"./splice":60}],40:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function isBlank(str) {
   return (/^\s*$/).test(makeString(str));
 };
 
-},{"./helper/makeString":26}],34:[function(require,module,exports){
+},{"./helper/makeString":33}],41:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var slice = [].slice;
 
@@ -26973,7 +29290,7 @@ module.exports = function join() {
   return args.join(makeString(separator));
 };
 
-},{"./helper/makeString":26}],35:[function(require,module,exports){
+},{"./helper/makeString":33}],42:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 /**
@@ -27027,27 +29344,27 @@ module.exports = function levenshtein(str1, str2) {
   return nextCol;
 };
 
-},{"./helper/makeString":26}],36:[function(require,module,exports){
+},{"./helper/makeString":33}],43:[function(require,module,exports){
 module.exports = function lines(str) {
   if (str == null) return [];
   return String(str).split(/\r\n?|\n/);
 };
 
-},{}],37:[function(require,module,exports){
+},{}],44:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function lpad(str, length, padStr) {
   return pad(str, length, padStr);
 };
 
-},{"./pad":43}],38:[function(require,module,exports){
+},{"./pad":50}],45:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function lrpad(str, length, padStr) {
   return pad(str, length, padStr, 'both');
 };
 
-},{"./pad":43}],39:[function(require,module,exports){
+},{"./pad":50}],46:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrimLeft = String.prototype.trimLeft;
@@ -27059,7 +29376,7 @@ module.exports = function ltrim(str, characters) {
   return str.replace(new RegExp('^' + characters + '+'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":22,"./helper/makeString":26}],40:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":29,"./helper/makeString":33}],47:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function(str, callback) {
@@ -27070,7 +29387,7 @@ module.exports = function(str, callback) {
   return str.replace(/./g, callback);
 };
 
-},{"./helper/makeString":26}],41:[function(require,module,exports){
+},{"./helper/makeString":33}],48:[function(require,module,exports){
 module.exports = function naturalCmp(str1, str2) {
   if (str1 == str2) return 0;
   if (!str1) return -1;
@@ -27101,7 +29418,7 @@ module.exports = function naturalCmp(str1, str2) {
   return str1 < str2 ? -1 : 1;
 };
 
-},{}],42:[function(require,module,exports){
+},{}],49:[function(require,module,exports){
 module.exports = function numberFormat(number, dec, dsep, tsep) {
   if (isNaN(number) || number == null) return '';
 
@@ -27115,7 +29432,7 @@ module.exports = function numberFormat(number, dec, dsep, tsep) {
   return fnums.replace(/(\d)(?=(?:\d{3})+$)/g, '$1' + tsep) + decimals;
 };
 
-},{}],43:[function(require,module,exports){
+},{}],50:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var strRepeat = require('./helper/strRepeat');
 
@@ -27143,14 +29460,14 @@ module.exports = function pad(str, length, padStr, type) {
   }
 };
 
-},{"./helper/makeString":26,"./helper/strRepeat":27}],44:[function(require,module,exports){
+},{"./helper/makeString":33,"./helper/strRepeat":34}],51:[function(require,module,exports){
 var adjacent = require('./helper/adjacent');
 
 module.exports = function succ(str) {
   return adjacent(str, -1);
 };
 
-},{"./helper/adjacent":21}],45:[function(require,module,exports){
+},{"./helper/adjacent":28}],52:[function(require,module,exports){
 /**
  * _s.prune: a more elegant version of truncate
  * prune extra chars, never leaving a half-chopped word.
@@ -27179,14 +29496,14 @@ module.exports = function prune(str, length, pruneStr) {
   return (template + pruneStr).length > str.length ? str : str.slice(0, template.length) + pruneStr;
 };
 
-},{"./helper/makeString":26,"./rtrim":51}],46:[function(require,module,exports){
+},{"./helper/makeString":33,"./rtrim":58}],53:[function(require,module,exports){
 var surround = require('./surround');
 
 module.exports = function quote(str, quoteChar) {
   return surround(str, quoteChar || '"');
 };
 
-},{"./surround":62}],47:[function(require,module,exports){
+},{"./surround":69}],54:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var strRepeat = require('./helper/strRepeat');
 
@@ -27204,7 +29521,7 @@ module.exports = function repeat(str, qty, separator) {
   return repeat.join(separator);
 };
 
-},{"./helper/makeString":26,"./helper/strRepeat":27}],48:[function(require,module,exports){
+},{"./helper/makeString":33,"./helper/strRepeat":34}],55:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function replaceAll(str, find, replace, ignorecase) {
@@ -27214,21 +29531,21 @@ module.exports = function replaceAll(str, find, replace, ignorecase) {
   return makeString(str).replace(reg, replace);
 };
 
-},{"./helper/makeString":26}],49:[function(require,module,exports){
+},{"./helper/makeString":33}],56:[function(require,module,exports){
 var chars = require('./chars');
 
 module.exports = function reverse(str) {
   return chars(str).reverse().join('');
 };
 
-},{"./chars":9}],50:[function(require,module,exports){
+},{"./chars":16}],57:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function rpad(str, length, padStr) {
   return pad(str, length, padStr, 'right');
 };
 
-},{"./pad":43}],51:[function(require,module,exports){
+},{"./pad":50}],58:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrimRight = String.prototype.trimRight;
@@ -27240,7 +29557,7 @@ module.exports = function rtrim(str, characters) {
   return str.replace(new RegExp(characters + '+$'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":22,"./helper/makeString":26}],52:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":29,"./helper/makeString":33}],59:[function(require,module,exports){
 var trim = require('./trim');
 var dasherize = require('./dasherize');
 var cleanDiacritics = require('./cleanDiacritics');
@@ -27249,7 +29566,7 @@ module.exports = function slugify(str) {
   return trim(dasherize(cleanDiacritics(str).replace(/[^\w\s-]/g, '-').toLowerCase()), '-');
 };
 
-},{"./cleanDiacritics":13,"./dasherize":15,"./trim":69}],53:[function(require,module,exports){
+},{"./cleanDiacritics":20,"./dasherize":22,"./trim":76}],60:[function(require,module,exports){
 var chars = require('./chars');
 
 module.exports = function splice(str, i, howmany, substr) {
@@ -27258,13 +29575,13 @@ module.exports = function splice(str, i, howmany, substr) {
   return arr.join('');
 };
 
-},{"./chars":9}],54:[function(require,module,exports){
+},{"./chars":16}],61:[function(require,module,exports){
 var deprecate = require('util-deprecate');
 
 module.exports = deprecate(require('sprintf-js').sprintf,
   'sprintf() will be removed in the next major release, use the sprintf-js package instead.');
 
-},{"sprintf-js":6,"util-deprecate":78}],55:[function(require,module,exports){
+},{"sprintf-js":11,"util-deprecate":85}],62:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var toPositive = require('./helper/toPositive');
 
@@ -27275,7 +29592,7 @@ module.exports = function startsWith(str, starts, position) {
   return str.lastIndexOf(starts, position) === position;
 };
 
-},{"./helper/makeString":26,"./helper/toPositive":28}],56:[function(require,module,exports){
+},{"./helper/makeString":33,"./helper/toPositive":35}],63:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strLeft(str, sep) {
@@ -27285,7 +29602,7 @@ module.exports = function strLeft(str, sep) {
   return~ pos ? str.slice(0, pos) : str;
 };
 
-},{"./helper/makeString":26}],57:[function(require,module,exports){
+},{"./helper/makeString":33}],64:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strLeftBack(str, sep) {
@@ -27295,7 +29612,7 @@ module.exports = function strLeftBack(str, sep) {
   return~ pos ? str.slice(0, pos) : str;
 };
 
-},{"./helper/makeString":26}],58:[function(require,module,exports){
+},{"./helper/makeString":33}],65:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strRight(str, sep) {
@@ -27305,7 +29622,7 @@ module.exports = function strRight(str, sep) {
   return~ pos ? str.slice(pos + sep.length, str.length) : str;
 };
 
-},{"./helper/makeString":26}],59:[function(require,module,exports){
+},{"./helper/makeString":33}],66:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strRightBack(str, sep) {
@@ -27315,26 +29632,26 @@ module.exports = function strRightBack(str, sep) {
   return~ pos ? str.slice(pos + sep.length, str.length) : str;
 };
 
-},{"./helper/makeString":26}],60:[function(require,module,exports){
+},{"./helper/makeString":33}],67:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function stripTags(str) {
   return makeString(str).replace(/<\/?[^>]+>/g, '');
 };
 
-},{"./helper/makeString":26}],61:[function(require,module,exports){
+},{"./helper/makeString":33}],68:[function(require,module,exports){
 var adjacent = require('./helper/adjacent');
 
 module.exports = function succ(str) {
   return adjacent(str, 1);
 };
 
-},{"./helper/adjacent":21}],62:[function(require,module,exports){
+},{"./helper/adjacent":28}],69:[function(require,module,exports){
 module.exports = function surround(str, wrapper) {
   return [wrapper, str, wrapper].join('');
 };
 
-},{}],63:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function swapCase(str) {
@@ -27343,7 +29660,7 @@ module.exports = function swapCase(str) {
   });
 };
 
-},{"./helper/makeString":26}],64:[function(require,module,exports){
+},{"./helper/makeString":33}],71:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function titleize(str) {
@@ -27352,7 +29669,7 @@ module.exports = function titleize(str) {
   });
 };
 
-},{"./helper/makeString":26}],65:[function(require,module,exports){
+},{"./helper/makeString":33}],72:[function(require,module,exports){
 var trim = require('./trim');
 
 function boolMatch(s, matchers) {
@@ -27374,14 +29691,14 @@ module.exports = function toBoolean(str, trueValues, falseValues) {
   if (boolMatch(str, falseValues || ['false', '0'])) return false;
 };
 
-},{"./trim":69}],66:[function(require,module,exports){
+},{"./trim":76}],73:[function(require,module,exports){
 module.exports = function toNumber(num, precision) {
   if (num == null) return 0;
   var factor = Math.pow(10, isFinite(precision) ? precision : 0);
   return Math.round(num * factor) / factor;
 };
 
-},{}],67:[function(require,module,exports){
+},{}],74:[function(require,module,exports){
 var rtrim = require('./rtrim');
 
 module.exports = function toSentence(array, separator, lastSeparator, serial) {
@@ -27395,14 +29712,14 @@ module.exports = function toSentence(array, separator, lastSeparator, serial) {
   return a.length ? a.join(separator) + lastSeparator + lastMember : lastMember;
 };
 
-},{"./rtrim":51}],68:[function(require,module,exports){
+},{"./rtrim":58}],75:[function(require,module,exports){
 var toSentence = require('./toSentence');
 
 module.exports = function toSentenceSerial(array, sep, lastSep) {
   return toSentence(array, sep, lastSep, true);
 };
 
-},{"./toSentence":67}],69:[function(require,module,exports){
+},{"./toSentence":74}],76:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrim = String.prototype.trim;
@@ -27414,7 +29731,7 @@ module.exports = function trim(str, characters) {
   return str.replace(new RegExp('^' + characters + '+|' + characters + '+$', 'g'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":22,"./helper/makeString":26}],70:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":29,"./helper/makeString":33}],77:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function truncate(str, length, truncateStr) {
@@ -27424,14 +29741,14 @@ module.exports = function truncate(str, length, truncateStr) {
   return str.length > length ? str.slice(0, length) + truncateStr : str;
 };
 
-},{"./helper/makeString":26}],71:[function(require,module,exports){
+},{"./helper/makeString":33}],78:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function underscored(str) {
   return trim(str).replace(/([a-z\d])([A-Z]+)/g, '$1_$2').replace(/[-\s]+/g, '_').toLowerCase();
 };
 
-},{"./trim":69}],72:[function(require,module,exports){
+},{"./trim":76}],79:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var htmlEntities = require('./helper/htmlEntities');
 
@@ -27453,7 +29770,7 @@ module.exports = function unescapeHTML(str) {
   });
 };
 
-},{"./helper/htmlEntities":25,"./helper/makeString":26}],73:[function(require,module,exports){
+},{"./helper/htmlEntities":32,"./helper/makeString":33}],80:[function(require,module,exports){
 module.exports = function unquote(str, quoteChar) {
   quoteChar = quoteChar || '"';
   if (str[0] === quoteChar && str[str.length - 1] === quoteChar)
@@ -27461,13 +29778,13 @@ module.exports = function unquote(str, quoteChar) {
   else return str;
 };
 
-},{}],74:[function(require,module,exports){
+},{}],81:[function(require,module,exports){
 var deprecate = require('util-deprecate');
 
 module.exports = deprecate(require('sprintf-js').vsprintf,
   'vsprintf() will be removed in the next major release, use the sprintf-js package instead.');
 
-},{"sprintf-js":6,"util-deprecate":78}],75:[function(require,module,exports){
+},{"sprintf-js":11,"util-deprecate":85}],82:[function(require,module,exports){
 var isBlank = require('./isBlank');
 var trim = require('./trim');
 
@@ -27476,7 +29793,7 @@ module.exports = function words(str, delimiter) {
   return trim(str, delimiter).split(delimiter || /\s+/);
 };
 
-},{"./isBlank":33,"./trim":69}],76:[function(require,module,exports){
+},{"./isBlank":40,"./trim":76}],83:[function(require,module,exports){
 // Wrap
 // wraps a string by a certain width
 
@@ -27580,7 +29897,7 @@ module.exports = function wrap(str, options){
   }
 };
 
-},{"./helper/makeString":26}],77:[function(require,module,exports){
+},{"./helper/makeString":33}],84:[function(require,module,exports){
 //     Underscore.js 1.8.3
 //     http://underscorejs.org
 //     (c) 2009-2015 Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
@@ -29130,7 +31447,7 @@ module.exports = function wrap(str, options){
   }
 }.call(this));
 
-},{}],78:[function(require,module,exports){
+},{}],85:[function(require,module,exports){
 (function (global){
 
 /**
