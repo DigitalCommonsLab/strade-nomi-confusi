@@ -2,6 +2,10 @@
 
 mappa delle strade dai nomi confusi di Trento
 
+[Demo](https://digitalcommonslab.github.io/strade-nomi-confusi/)
+
+# Dati
+
 data/
 ├── highway.json		GeoJSON originali scaricati con overpass
 ├── highway.csv			Proprieta principali senza parte geometrica
