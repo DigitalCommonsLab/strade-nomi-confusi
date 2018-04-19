@@ -166,7 +166,7 @@ console.log('dissolve: ',json);
 	var geo = L.geoJSON(json, {
 			style: function(f) {
 				return {
-					weight: 4,
+					weight: 6,
 					opacity: 0.8,
 					color: randomColor()
 				};
@@ -191,7 +191,7 @@ console.log('dissolve: ',json);
 				}).on('mouseout', function(e) {
 
 					e.target.setStyle({
-						weight:4,
+						weight: 6,
 						opacity:0.8
 					});
 
@@ -221,6 +221,8 @@ console.log('dissolve: ',json);
 						l.setStyle({
 							opacity: 0.2
 						});
+
+						l.closeTooltip();
 					});
 
 					ranks = _.sortBy(ranks, 'lev').reverse();
@@ -236,18 +238,21 @@ console.log('dissolve: ',json);
 							opacity: 1,
 							weight: 10
 						})
-						.bindTooltip(ranks[r].name+'<br />simile al <b>'+lev+'%</b>');
+						.bindTooltip(ranks[r].name+'<br />simile al <b>'+lev+'%</b>',{permanent:true});
 						
 						bb.extend( ranks[r].layer.getBounds() );
 					}
 
-					map.once('moveend zoomend', function(e) {
-						for(let r in ranks)
-							ranks[r].layer.openTooltip();
-					});
-					map.fitBounds(bb,{
-						padding: L.point(200,200)
-					});
+					if(ranks.length>1) {
+
+						map.once('moveend zoomend', function(e) {
+							for(let r in ranks)
+								ranks[r].layer.openTooltip();
+						});
+						map.fitBounds(bb,{
+							padding: L.point(300, 300)
+						});
+					}
 
 				});
 			}
@@ -259,7 +264,7 @@ console.log('dissolve: ',json);
 	map.on('click', function(e) {
 		geo.eachLayer(function(l) {
 			l.setStyle({
-				weight:4,
+				weight: 6,
 				opacity:0.8,
 			});
 		});
