@@ -24,14 +24,25 @@ var $ = require('jquery'),
 	Search = require('leaflet-search'),
 	dissolve = require('geojson-dissolve');
 	//Panel = require('leaflet-panel-layers');
+	levenshtein = require('levenshtein'),
+	levenshteinDamerau = require('damerau-levenshtein');
+	_.mixin({str: s});
 
-var levenshtein = require('damerau-levenshtein');
 
-const MIN_LEV_SIMILARITY = 0.85;
+const MIN_LEV_SIMILARITY = 0.80;
+const DAMERAU = true;			//use Damerau algorithm
 
-_.mixin({str: s});
 
-window._ = _;
+function getLevenstein(str1, str2) {
+	if(DAMERAU)	{
+		var lev = levenshteinDamerau(str1, str2);
+		return lev.similarity;
+	}else {
+		var lev = new levenshtein(str1, str2);
+		return lev.distance;
+	}
+}
+
 /*
 String.prototype.levenshtein = function(string) {
 	var a = this, b = string + "", m = [], i, j, min = Math.min;
@@ -95,15 +106,7 @@ function getUncommon(text, common) {
     return uncommonArr.join(' ');
 }
 
-function cleanName(text) {
-	var ret = ""+_.str(text).trim().toLowerCase();
-	
-	ret.diff(blacklist);
-
-	return ret;
-};
-
-function randomColor() {
+function randomColor(str) {
 	var letters = '0123456789ABCDEF';
 	var color = '#';
 	for (var i = 0; i < 6; i++) {
@@ -135,7 +138,7 @@ $.getJSON('data/highway.json', function(json) {
 
 	//TODO normalize properties name:it short_name to only name
 	
-console.log('geojson',json);
+//console.log('geojson',json);
 
 	var fgroups = _.groupBy(json.features, function(f) {
 		return f.properties.name;
@@ -162,14 +165,14 @@ console.log('geojson',json);
 		return f1
 	});
 
-console.log('dissolve: ',json);
+//console.log('dissolve: ',json);
 
 	var geo = L.geoJSON(json, {
 			style: function(f) {
 				return {
 					weight: 6,
 					opacity: 0.8,
-					color: randomColor()
+					color: randomColor(f.properties.cleanName)
 				};
 			},
 			onEachFeature: function (f, layer) {
@@ -184,29 +187,30 @@ console.log('dissolve: ',json);
 					e.target.bringToFront();
 					e.target.openTooltip();
 
-					e.target.defStyle = f.style;
+					//e.target.defStyle = _.clone(e.target.style);
 					e.target.setStyle({
 						weight: 10,
 						opacity: 1,
 					});
 				}).on('mouseout', function(e) {
 
-					e.target.setStyle({
+					//e.target.setStyle(e.target.defStyle)
+					geo.resetStyle(e.target)
+					/*e.target.setStyle({
 						weight: 6,
 						opacity:0.8
-					});
+					});*/
 
 				}).on('click', function(e) {
 
-					L.DomEvent.stopPropagation(e)
+					L.DomEvent.stopPropagation(e);
 
-					var ranks = [];
+					var selectName = e.target.feature.properties.cleanName,
+						ranks = [];
 
 					geo.eachLayer(function(l) {
 						
-						//var lev = e.target.feature.properties.cleanName.levenstein( l.feature.properties.cleanName );
-						var lev = levenshtein(e.target.feature.properties.cleanName, l.feature.properties.cleanName);
-						lev = lev.similarity;
+						var lev = getLevenstein(selectName, l.feature.properties.cleanName)
 						//steps: 0,
 				        //relative: 0,
 				        //similarity: 1
@@ -214,10 +218,10 @@ console.log('dissolve: ',json);
 							ranks.push({
 								lev: lev,
 								name: l.feature.properties.name,
+								cleanName: l.feature.properties.cleanName,
 								layer: l,
 							});
 						}
-						console.log('"'+e.target.feature.properties.cleanName+'"','==', '"'+l.feature.properties.cleanName+'"', ' ==> ['+lev.toFixed(2)+']');
 
 						l.setStyle({
 							opacity: 0.2
@@ -230,6 +234,8 @@ console.log('dissolve: ',json);
 					ranks = _.first(ranks, 10);
 
 					var bb = ranks[0].layer.getBounds();
+					
+					console.clear();
 
 					for(let r in ranks) {
 						
@@ -242,6 +248,8 @@ console.log('dissolve: ',json);
 						.bindTooltip(ranks[r].name+'<br />simile al <b>'+lev+'%</b>',{permanent:true});
 						
 						bb.extend( ranks[r].layer.getBounds() );
+
+						console.log('"'+selectName+'"','==', '"'+ranks[r].cleanName+'"', ' ==> '+ranks[r].lev.toFixed(2));
 					}
 
 					if(ranks.length>1) {
@@ -260,8 +268,8 @@ console.log('dissolve: ',json);
 		});
 	//TODO fitBounds(json.bbox)
 	geo.addTo(map);
-	//
-	//
+	
+	
 	L.control.search({
 		layer: geo,
 		propertyName: 'name',
@@ -281,6 +289,7 @@ console.log('dissolve: ',json);
 		e.layer.openTooltip();
 	}).addTo(map);
 
+
 	map.on('click', function(e) {
 		geo.eachLayer(function(l) {
 			l.setStyle({
@@ -291,7 +300,7 @@ console.log('dissolve: ',json);
 	});
 
 });
-},{"damerau-levenshtein":3,"geojson-dissolve":4,"jquery":8,"jquery-csv":7,"latinize":9,"leaflet":11,"leaflet-search":10,"underscore":85,"underscore.string":39}],2:[function(require,module,exports){
+},{"damerau-levenshtein":3,"geojson-dissolve":4,"jquery":8,"jquery-csv":7,"latinize":9,"leaflet":11,"leaflet-search":10,"levenshtein":12,"underscore":86,"underscore.string":40}],2:[function(require,module,exports){
 /**
  * Callback for coordEach
  *
@@ -1090,7 +1099,7 @@ function dissolve () {
 }
 
 
-},{"@turf/meta":2,"geojson-flatten":5,"geojson-linestring-dissolve":6,"topojson-client":13,"topojson-server":14}],5:[function(require,module,exports){
+},{"@turf/meta":2,"geojson-flatten":5,"geojson-linestring-dissolve":6,"topojson-client":14,"topojson-server":15}],5:[function(require,module,exports){
 function flatten(gj) {
     switch ((gj && gj.type) || null) {
         case 'FeatureCollection':
@@ -13479,7 +13488,7 @@ return jQuery;
 
 },{}],10:[function(require,module,exports){
 /* 
- * Leaflet Control Search v2.4.0 - 2018-03-13 
+ * Leaflet Control Search v2.8.0 - 2018-04-20 
  * 
  * Copyright 2018 Stefano Cudini 
  * stefano.cudini@gmail.com 
@@ -28296,6 +28305,114 @@ exports.map = createMap;
 
 
 },{}],12:[function(require,module,exports){
+(function(root, factory){
+  if (typeof define == 'function' && typeof define.amd == 'object' && define.amd) {
+    define(function(){
+      return factory(root);
+    });
+  } else if (typeof module == 'object' && module && module.exports) {
+    module.exports = factory(root);
+  } else {
+    root.Levenshtein = factory(root);
+  }
+}(this, function(root){
+
+  function forEach( array, fn ) { var i, length
+    i = -1
+    length = array.length
+    while ( ++i < length )
+      fn( array[ i ], i, array )
+  }
+
+  function map( array, fn ) { var result
+    result = Array( array.length )
+    forEach( array, function ( val, i, array ) {
+      result[i] = fn( val, i, array )
+    })
+    return result
+  }
+
+  function reduce( array, fn, accumulator ) {
+    forEach( array, function( val, i, array ) {
+      accumulator = fn( val, i, array )
+    })
+    return accumulator
+  }
+
+  // Levenshtein distance
+  function Levenshtein( str_m, str_n ) { var previous, current, matrix
+    // Constructor
+    matrix = this._matrix = []
+
+    // Sanity checks
+    if ( str_m == str_n )
+      return this.distance = 0
+    else if ( str_m == '' )
+      return this.distance = str_n.length
+    else if ( str_n == '' )
+      return this.distance = str_m.length
+    else {
+      // Danger Will Robinson
+      previous = [ 0 ]
+      forEach( str_m, function( v, i ) { i++, previous[ i ] = i } )
+
+      matrix[0] = previous
+      forEach( str_n, function( n_val, n_idx ) {
+        current = [ ++n_idx ]
+        forEach( str_m, function( m_val, m_idx ) {
+          m_idx++
+          if ( str_m.charAt( m_idx - 1 ) == str_n.charAt( n_idx - 1 ) )
+            current[ m_idx ] = previous[ m_idx - 1 ]
+          else
+            current[ m_idx ] = Math.min
+              ( previous[ m_idx ]     + 1   // Deletion
+              , current[  m_idx - 1 ] + 1   // Insertion
+              , previous[ m_idx - 1 ] + 1   // Subtraction
+              )
+        })
+        previous = current
+        matrix[ matrix.length ] = previous
+      })
+
+      return this.distance = current[ current.length - 1 ]
+    }
+  }
+
+  Levenshtein.prototype.toString = Levenshtein.prototype.inspect = function inspect ( no_print ) { var matrix, max, buff, sep, rows
+    matrix = this.getMatrix()
+    max = reduce( matrix,function( m, o ) {
+      return Math.max( m, reduce( o, Math.max, 0 ) )
+    }, 0 )
+    buff = Array( ( max + '' ).length ).join( ' ' )
+
+    sep = []
+    while ( sep.length < (matrix[0] && matrix[0].length || 0) )
+      sep[ sep.length ] = Array( buff.length + 1 ).join( '-' )
+    sep = sep.join( '-+' ) + '-'
+
+    rows = map( matrix, function( row ) { var cells
+      cells = map( row, function( cell ) {
+        return ( buff + cell ).slice( - buff.length )
+      })
+      return cells.join( ' |' ) + ' '
+    })
+
+    return rows.join( "\n" + sep + "\n" )
+  }
+
+  Levenshtein.prototype.getMatrix = function () {
+    return this._matrix.slice()
+  }
+
+  Levenshtein.prototype.valueOf = function() {
+    return this.distance
+  }
+
+  return Levenshtein
+
+}));
+
+},{}],13:[function(require,module,exports){
 /* global window, exports, define */
 
 !function() {
@@ -28515,7 +28632,7 @@ exports.map = createMap;
     /* eslint-enable quote-props */
 }()
 
-},{}],13:[function(require,module,exports){
+},{}],14:[function(require,module,exports){
 // https://github.com/topojson/topojson-client Version 3.0.0. Copyright 2017 Mike Bostock.
 (function (global, factory) {
 	typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
@@ -29022,7 +29139,7 @@ Object.defineProperty(exports, '__esModule', { value: true });
 
 })));
 
-},{}],14:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
 // https://github.com/topojson/topojson-server Version 3.0.0. Copyright 2017 Mike Bostock.
 (function (global, factory) {
 	typeof exports === 'object' && typeof module !== 'undefined' ? factory(exports) :
@@ -29860,7 +29977,7 @@ Object.defineProperty(exports, '__esModule', { value: true });
 
 })));
 
-},{}],15:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 var trim = require('./trim');
 var decap = require('./decapitalize');
 
@@ -29876,7 +29993,7 @@ module.exports = function camelize(str, decapitalize) {
   }
 };
 
-},{"./decapitalize":24,"./trim":77}],16:[function(require,module,exports){
+},{"./decapitalize":25,"./trim":78}],17:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function capitalize(str, lowercaseRest) {
@@ -29886,14 +30003,14 @@ module.exports = function capitalize(str, lowercaseRest) {
   return str.charAt(0).toUpperCase() + remainingChars;
 };
 
-},{"./helper/makeString":34}],17:[function(require,module,exports){
+},{"./helper/makeString":35}],18:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function chars(str) {
   return makeString(str).split('');
 };
 
-},{"./helper/makeString":34}],18:[function(require,module,exports){
+},{"./helper/makeString":35}],19:[function(require,module,exports){
 module.exports = function chop(str, step) {
   if (str == null) return [];
   str = String(str);
@@ -29901,7 +30018,7 @@ module.exports = function chop(str, step) {
   return step > 0 ? str.match(new RegExp('.{1,' + step + '}', 'g')) : [str];
 };
 
-},{}],19:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 var capitalize = require('./capitalize');
 var camelize = require('./camelize');
 var makeString = require('./helper/makeString');
@@ -29911,14 +30028,14 @@ module.exports = function classify(str) {
   return capitalize(camelize(str.replace(/[\W_]/g, ' ')).replace(/\s/g, ''));
 };
 
-},{"./camelize":15,"./capitalize":16,"./helper/makeString":34}],20:[function(require,module,exports){
+},{"./camelize":16,"./capitalize":17,"./helper/makeString":35}],21:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function clean(str) {
   return trim(str).replace(/\s\s+/g, ' ');
 };
 
-},{"./trim":77}],21:[function(require,module,exports){
+},{"./trim":78}],22:[function(require,module,exports){
 
 var makeString = require('./helper/makeString');
 
@@ -29942,7 +30059,7 @@ module.exports = function cleanDiacritics(str) {
   });
 };
 
-},{"./helper/makeString":34}],22:[function(require,module,exports){
+},{"./helper/makeString":35}],23:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function(str, substr) {
@@ -29954,14 +30071,14 @@ module.exports = function(str, substr) {
   return str.split(substr).length - 1;
 };
 
-},{"./helper/makeString":34}],23:[function(require,module,exports){
+},{"./helper/makeString":35}],24:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function dasherize(str) {
   return trim(str).replace(/([A-Z])/g, '-$1').replace(/[-_\s]+/g, '-').toLowerCase();
 };
 
-},{"./trim":77}],24:[function(require,module,exports){
+},{"./trim":78}],25:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function decapitalize(str) {
@@ -29969,7 +30086,7 @@ module.exports = function decapitalize(str) {
   return str.charAt(0).toLowerCase() + str.slice(1);
 };
 
-},{"./helper/makeString":34}],25:[function(require,module,exports){
+},{"./helper/makeString":35}],26:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 function getIndent(str) {
@@ -29999,7 +30116,7 @@ module.exports = function dedent(str, pattern) {
   return str.replace(reg, '');
 };
 
-},{"./helper/makeString":34}],26:[function(require,module,exports){
+},{"./helper/makeString":35}],27:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var toPositive = require('./helper/toPositive');
 
@@ -30014,7 +30131,7 @@ module.exports = function endsWith(str, ends, position) {
   return position >= 0 && str.indexOf(ends, position) === position;
 };
 
-},{"./helper/makeString":34,"./helper/toPositive":36}],27:[function(require,module,exports){
+},{"./helper/makeString":35,"./helper/toPositive":37}],28:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var escapeChars = require('./helper/escapeChars');
 
@@ -30033,7 +30150,7 @@ module.exports = function escapeHTML(str) {
   });
 };
 
-},{"./helper/escapeChars":31,"./helper/makeString":34}],28:[function(require,module,exports){
+},{"./helper/escapeChars":32,"./helper/makeString":35}],29:[function(require,module,exports){
 module.exports = function() {
   var result = {};
 
@@ -30045,7 +30162,7 @@ module.exports = function() {
   return result;
 };
 
-},{}],29:[function(require,module,exports){
+},{}],30:[function(require,module,exports){
 var makeString = require('./makeString');
 
 module.exports = function adjacent(str, direction) {
@@ -30056,7 +30173,7 @@ module.exports = function adjacent(str, direction) {
   return str.slice(0, -1) + String.fromCharCode(str.charCodeAt(str.length - 1) + direction);
 };
 
-},{"./makeString":34}],30:[function(require,module,exports){
+},{"./makeString":35}],31:[function(require,module,exports){
 var escapeRegExp = require('./escapeRegExp');
 
 module.exports = function defaultToWhiteSpace(characters) {
@@ -30068,7 +30185,7 @@ module.exports = function defaultToWhiteSpace(characters) {
     return '[' + escapeRegExp(characters) + ']';
 };
 
-},{"./escapeRegExp":32}],31:[function(require,module,exports){
+},{"./escapeRegExp":33}],32:[function(require,module,exports){
 /* We're explicitly defining the list of entities we want to escape.
 nbsp is an HTML entity, but we don't want to escape all space characters in a string, hence its omission in this map.
 
@@ -30089,14 +30206,14 @@ var escapeChars = {
 
 module.exports = escapeChars;
 
-},{}],32:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 var makeString = require('./makeString');
 
 module.exports = function escapeRegExp(str) {
   return makeString(str).replace(/([.*+?^=!:${}()|[\]\/\\])/g, '\\$1');
 };
 
-},{"./makeString":34}],33:[function(require,module,exports){
+},{"./makeString":35}],34:[function(require,module,exports){
 /*
 We're explicitly defining the list of entities that might see in escape HTML strings
 */
@@ -30117,7 +30234,7 @@ var htmlEntities = {
 
 module.exports = htmlEntities;
 
-},{}],34:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 /**
  * Ensure some object is a coerced to a string
  **/
@@ -30126,7 +30243,7 @@ module.exports = function makeString(object) {
   return '' + object;
 };
 
-},{}],35:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 module.exports = function strRepeat(str, qty){
   if (qty < 1) return '';
   var result = '';
@@ -30137,12 +30254,12 @@ module.exports = function strRepeat(str, qty){
   return result;
 };
 
-},{}],36:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 module.exports = function toPositive(number) {
   return number < 0 ? 0 : (+number || 0);
 };
 
-},{}],37:[function(require,module,exports){
+},{}],38:[function(require,module,exports){
 var capitalize = require('./capitalize');
 var underscored = require('./underscored');
 var trim = require('./trim');
@@ -30151,7 +30268,7 @@ module.exports = function humanize(str) {
   return capitalize(trim(underscored(str).replace(/_id$/, '').replace(/_/g, ' ')));
 };
 
-},{"./capitalize":16,"./trim":77,"./underscored":79}],38:[function(require,module,exports){
+},{"./capitalize":17,"./trim":78,"./underscored":80}],39:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function include(str, needle) {
@@ -30159,7 +30276,7 @@ module.exports = function include(str, needle) {
   return makeString(str).indexOf(needle) !== -1;
 };
 
-},{"./helper/makeString":34}],39:[function(require,module,exports){
+},{"./helper/makeString":35}],40:[function(require,module,exports){
 /*
 * Underscore.string
 * (c) 2010 Esa-Matti Suuronen <esa-matti aet suuronen dot org>
@@ -30304,21 +30421,21 @@ for (var method in prototypeMethods) prototype2method(prototypeMethods[method]);
 
 module.exports = s;
 
-},{"./camelize":15,"./capitalize":16,"./chars":17,"./chop":18,"./classify":19,"./clean":20,"./cleanDiacritics":21,"./count":22,"./dasherize":23,"./decapitalize":24,"./dedent":25,"./endsWith":26,"./escapeHTML":27,"./exports":28,"./helper/escapeRegExp":32,"./humanize":37,"./include":38,"./insert":40,"./isBlank":41,"./join":42,"./levenshtein":43,"./lines":44,"./lpad":45,"./lrpad":46,"./ltrim":47,"./map":48,"./naturalCmp":49,"./numberFormat":50,"./pad":51,"./pred":52,"./prune":53,"./quote":54,"./repeat":55,"./replaceAll":56,"./reverse":57,"./rpad":58,"./rtrim":59,"./slugify":60,"./splice":61,"./sprintf":62,"./startsWith":63,"./strLeft":64,"./strLeftBack":65,"./strRight":66,"./strRightBack":67,"./stripTags":68,"./succ":69,"./surround":70,"./swapCase":71,"./titleize":72,"./toBoolean":73,"./toNumber":74,"./toSentence":75,"./toSentenceSerial":76,"./trim":77,"./truncate":78,"./underscored":79,"./unescapeHTML":80,"./unquote":81,"./vsprintf":82,"./words":83,"./wrap":84}],40:[function(require,module,exports){
+},{"./camelize":16,"./capitalize":17,"./chars":18,"./chop":19,"./classify":20,"./clean":21,"./cleanDiacritics":22,"./count":23,"./dasherize":24,"./decapitalize":25,"./dedent":26,"./endsWith":27,"./escapeHTML":28,"./exports":29,"./helper/escapeRegExp":33,"./humanize":38,"./include":39,"./insert":41,"./isBlank":42,"./join":43,"./levenshtein":44,"./lines":45,"./lpad":46,"./lrpad":47,"./ltrim":48,"./map":49,"./naturalCmp":50,"./numberFormat":51,"./pad":52,"./pred":53,"./prune":54,"./quote":55,"./repeat":56,"./replaceAll":57,"./reverse":58,"./rpad":59,"./rtrim":60,"./slugify":61,"./splice":62,"./sprintf":63,"./startsWith":64,"./strLeft":65,"./strLeftBack":66,"./strRight":67,"./strRightBack":68,"./stripTags":69,"./succ":70,"./surround":71,"./swapCase":72,"./titleize":73,"./toBoolean":74,"./toNumber":75,"./toSentence":76,"./toSentenceSerial":77,"./trim":78,"./truncate":79,"./underscored":80,"./unescapeHTML":81,"./unquote":82,"./vsprintf":83,"./words":84,"./wrap":85}],41:[function(require,module,exports){
 var splice = require('./splice');
 
 module.exports = function insert(str, i, substr) {
   return splice(str, i, 0, substr);
 };
 
-},{"./splice":61}],41:[function(require,module,exports){
+},{"./splice":62}],42:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function isBlank(str) {
   return (/^\s*$/).test(makeString(str));
 };
 
-},{"./helper/makeString":34}],42:[function(require,module,exports){
+},{"./helper/makeString":35}],43:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var slice = [].slice;
 
@@ -30329,7 +30446,7 @@ module.exports = function join() {
   return args.join(makeString(separator));
 };
 
-},{"./helper/makeString":34}],43:[function(require,module,exports){
+},{"./helper/makeString":35}],44:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 /**
@@ -30383,27 +30500,27 @@ module.exports = function levenshtein(str1, str2) {
   return nextCol;
 };
 
-},{"./helper/makeString":34}],44:[function(require,module,exports){
+},{"./helper/makeString":35}],45:[function(require,module,exports){
 module.exports = function lines(str) {
   if (str == null) return [];
   return String(str).split(/\r\n?|\n/);
 };
 
-},{}],45:[function(require,module,exports){
+},{}],46:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function lpad(str, length, padStr) {
   return pad(str, length, padStr);
 };
 
-},{"./pad":51}],46:[function(require,module,exports){
+},{"./pad":52}],47:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function lrpad(str, length, padStr) {
   return pad(str, length, padStr, 'both');
 };
 
-},{"./pad":51}],47:[function(require,module,exports){
+},{"./pad":52}],48:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrimLeft = String.prototype.trimLeft;
@@ -30415,7 +30532,7 @@ module.exports = function ltrim(str, characters) {
   return str.replace(new RegExp('^' + characters + '+'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":30,"./helper/makeString":34}],48:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":31,"./helper/makeString":35}],49:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function(str, callback) {
@@ -30426,7 +30543,7 @@ module.exports = function(str, callback) {
   return str.replace(/./g, callback);
 };
 
-},{"./helper/makeString":34}],49:[function(require,module,exports){
+},{"./helper/makeString":35}],50:[function(require,module,exports){
 module.exports = function naturalCmp(str1, str2) {
   if (str1 == str2) return 0;
   if (!str1) return -1;
@@ -30457,7 +30574,7 @@ module.exports = function naturalCmp(str1, str2) {
   return str1 < str2 ? -1 : 1;
 };
 
-},{}],50:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
 module.exports = function numberFormat(number, dec, dsep, tsep) {
   if (isNaN(number) || number == null) return '';
 
@@ -30471,7 +30588,7 @@ module.exports = function numberFormat(number, dec, dsep, tsep) {
   return fnums.replace(/(\d)(?=(?:\d{3})+$)/g, '$1' + tsep) + decimals;
 };
 
-},{}],51:[function(require,module,exports){
+},{}],52:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var strRepeat = require('./helper/strRepeat');
 
@@ -30499,14 +30616,14 @@ module.exports = function pad(str, length, padStr, type) {
   }
 };
 
-},{"./helper/makeString":34,"./helper/strRepeat":35}],52:[function(require,module,exports){
+},{"./helper/makeString":35,"./helper/strRepeat":36}],53:[function(require,module,exports){
 var adjacent = require('./helper/adjacent');
 
 module.exports = function succ(str) {
   return adjacent(str, -1);
 };
 
-},{"./helper/adjacent":29}],53:[function(require,module,exports){
+},{"./helper/adjacent":30}],54:[function(require,module,exports){
 /**
  * _s.prune: a more elegant version of truncate
  * prune extra chars, never leaving a half-chopped word.
@@ -30535,14 +30652,14 @@ module.exports = function prune(str, length, pruneStr) {
   return (template + pruneStr).length > str.length ? str : str.slice(0, template.length) + pruneStr;
 };
 
-},{"./helper/makeString":34,"./rtrim":59}],54:[function(require,module,exports){
+},{"./helper/makeString":35,"./rtrim":60}],55:[function(require,module,exports){
 var surround = require('./surround');
 
 module.exports = function quote(str, quoteChar) {
   return surround(str, quoteChar || '"');
 };
 
-},{"./surround":70}],55:[function(require,module,exports){
+},{"./surround":71}],56:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var strRepeat = require('./helper/strRepeat');
 
@@ -30560,7 +30677,7 @@ module.exports = function repeat(str, qty, separator) {
   return repeat.join(separator);
 };
 
-},{"./helper/makeString":34,"./helper/strRepeat":35}],56:[function(require,module,exports){
+},{"./helper/makeString":35,"./helper/strRepeat":36}],57:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function replaceAll(str, find, replace, ignorecase) {
@@ -30570,21 +30687,21 @@ module.exports = function replaceAll(str, find, replace, ignorecase) {
   return makeString(str).replace(reg, replace);
 };
 
-},{"./helper/makeString":34}],57:[function(require,module,exports){
+},{"./helper/makeString":35}],58:[function(require,module,exports){
 var chars = require('./chars');
 
 module.exports = function reverse(str) {
   return chars(str).reverse().join('');
 };
 
-},{"./chars":17}],58:[function(require,module,exports){
+},{"./chars":18}],59:[function(require,module,exports){
 var pad = require('./pad');
 
 module.exports = function rpad(str, length, padStr) {
   return pad(str, length, padStr, 'right');
 };
 
-},{"./pad":51}],59:[function(require,module,exports){
+},{"./pad":52}],60:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrimRight = String.prototype.trimRight;
@@ -30596,7 +30713,7 @@ module.exports = function rtrim(str, characters) {
   return str.replace(new RegExp(characters + '+$'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":30,"./helper/makeString":34}],60:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":31,"./helper/makeString":35}],61:[function(require,module,exports){
 var trim = require('./trim');
 var dasherize = require('./dasherize');
 var cleanDiacritics = require('./cleanDiacritics');
@@ -30605,7 +30722,7 @@ module.exports = function slugify(str) {
   return trim(dasherize(cleanDiacritics(str).replace(/[^\w\s-]/g, '-').toLowerCase()), '-');
 };
 
-},{"./cleanDiacritics":21,"./dasherize":23,"./trim":77}],61:[function(require,module,exports){
+},{"./cleanDiacritics":22,"./dasherize":24,"./trim":78}],62:[function(require,module,exports){
 var chars = require('./chars');
 
 module.exports = function splice(str, i, howmany, substr) {
@@ -30614,13 +30731,13 @@ module.exports = function splice(str, i, howmany, substr) {
   return arr.join('');
 };
 
-},{"./chars":17}],62:[function(require,module,exports){
+},{"./chars":18}],63:[function(require,module,exports){
 var deprecate = require('util-deprecate');
 
 module.exports = deprecate(require('sprintf-js').sprintf,
   'sprintf() will be removed in the next major release, use the sprintf-js package instead.');
 
-},{"sprintf-js":12,"util-deprecate":86}],63:[function(require,module,exports){
+},{"sprintf-js":13,"util-deprecate":87}],64:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var toPositive = require('./helper/toPositive');
 
@@ -30631,7 +30748,7 @@ module.exports = function startsWith(str, starts, position) {
   return str.lastIndexOf(starts, position) === position;
 };
 
-},{"./helper/makeString":34,"./helper/toPositive":36}],64:[function(require,module,exports){
+},{"./helper/makeString":35,"./helper/toPositive":37}],65:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strLeft(str, sep) {
@@ -30641,7 +30758,7 @@ module.exports = function strLeft(str, sep) {
   return~ pos ? str.slice(0, pos) : str;
 };
 
-},{"./helper/makeString":34}],65:[function(require,module,exports){
+},{"./helper/makeString":35}],66:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strLeftBack(str, sep) {
@@ -30651,7 +30768,7 @@ module.exports = function strLeftBack(str, sep) {
   return~ pos ? str.slice(0, pos) : str;
 };
 
-},{"./helper/makeString":34}],66:[function(require,module,exports){
+},{"./helper/makeString":35}],67:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strRight(str, sep) {
@@ -30661,7 +30778,7 @@ module.exports = function strRight(str, sep) {
   return~ pos ? str.slice(pos + sep.length, str.length) : str;
 };
 
-},{"./helper/makeString":34}],67:[function(require,module,exports){
+},{"./helper/makeString":35}],68:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function strRightBack(str, sep) {
@@ -30671,26 +30788,26 @@ module.exports = function strRightBack(str, sep) {
   return~ pos ? str.slice(pos + sep.length, str.length) : str;
 };
 
-},{"./helper/makeString":34}],68:[function(require,module,exports){
+},{"./helper/makeString":35}],69:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function stripTags(str) {
   return makeString(str).replace(/<\/?[^>]+>/g, '');
 };
 
-},{"./helper/makeString":34}],69:[function(require,module,exports){
+},{"./helper/makeString":35}],70:[function(require,module,exports){
 var adjacent = require('./helper/adjacent');
 
 module.exports = function succ(str) {
   return adjacent(str, 1);
 };
 
-},{"./helper/adjacent":29}],70:[function(require,module,exports){
+},{"./helper/adjacent":30}],71:[function(require,module,exports){
 module.exports = function surround(str, wrapper) {
   return [wrapper, str, wrapper].join('');
 };
 
-},{}],71:[function(require,module,exports){
+},{}],72:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function swapCase(str) {
@@ -30699,7 +30816,7 @@ module.exports = function swapCase(str) {
   });
 };
 
-},{"./helper/makeString":34}],72:[function(require,module,exports){
+},{"./helper/makeString":35}],73:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function titleize(str) {
@@ -30708,7 +30825,7 @@ module.exports = function titleize(str) {
   });
 };
 
-},{"./helper/makeString":34}],73:[function(require,module,exports){
+},{"./helper/makeString":35}],74:[function(require,module,exports){
 var trim = require('./trim');
 
 function boolMatch(s, matchers) {
@@ -30730,14 +30847,14 @@ module.exports = function toBoolean(str, trueValues, falseValues) {
   if (boolMatch(str, falseValues || ['false', '0'])) return false;
 };
 
-},{"./trim":77}],74:[function(require,module,exports){
+},{"./trim":78}],75:[function(require,module,exports){
 module.exports = function toNumber(num, precision) {
   if (num == null) return 0;
   var factor = Math.pow(10, isFinite(precision) ? precision : 0);
   return Math.round(num * factor) / factor;
 };
 
-},{}],75:[function(require,module,exports){
+},{}],76:[function(require,module,exports){
 var rtrim = require('./rtrim');
 
 module.exports = function toSentence(array, separator, lastSeparator, serial) {
@@ -30751,14 +30868,14 @@ module.exports = function toSentence(array, separator, lastSeparator, serial) {
   return a.length ? a.join(separator) + lastSeparator + lastMember : lastMember;
 };
 
-},{"./rtrim":59}],76:[function(require,module,exports){
+},{"./rtrim":60}],77:[function(require,module,exports){
 var toSentence = require('./toSentence');
 
 module.exports = function toSentenceSerial(array, sep, lastSep) {
   return toSentence(array, sep, lastSep, true);
 };
 
-},{"./toSentence":75}],77:[function(require,module,exports){
+},{"./toSentence":76}],78:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var defaultToWhiteSpace = require('./helper/defaultToWhiteSpace');
 var nativeTrim = String.prototype.trim;
@@ -30770,7 +30887,7 @@ module.exports = function trim(str, characters) {
   return str.replace(new RegExp('^' + characters + '+|' + characters + '+$', 'g'), '');
 };
 
-},{"./helper/defaultToWhiteSpace":30,"./helper/makeString":34}],78:[function(require,module,exports){
+},{"./helper/defaultToWhiteSpace":31,"./helper/makeString":35}],79:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 
 module.exports = function truncate(str, length, truncateStr) {
@@ -30780,14 +30897,14 @@ module.exports = function truncate(str, length, truncateStr) {
   return str.length > length ? str.slice(0, length) + truncateStr : str;
 };
 
-},{"./helper/makeString":34}],79:[function(require,module,exports){
+},{"./helper/makeString":35}],80:[function(require,module,exports){
 var trim = require('./trim');
 
 module.exports = function underscored(str) {
   return trim(str).replace(/([a-z\d])([A-Z]+)/g, '$1_$2').replace(/[-\s]+/g, '_').toLowerCase();
 };
 
-},{"./trim":77}],80:[function(require,module,exports){
+},{"./trim":78}],81:[function(require,module,exports){
 var makeString = require('./helper/makeString');
 var htmlEntities = require('./helper/htmlEntities');
 
@@ -30809,7 +30926,7 @@ module.exports = function unescapeHTML(str) {
   });
 };
 
-},{"./helper/htmlEntities":33,"./helper/makeString":34}],81:[function(require,module,exports){
+},{"./helper/htmlEntities":34,"./helper/makeString":35}],82:[function(require,module,exports){
 module.exports = function unquote(str, quoteChar) {
   quoteChar = quoteChar || '"';
   if (str[0] === quoteChar && str[str.length - 1] === quoteChar)
@@ -30817,13 +30934,13 @@ module.exports = function unquote(str, quoteChar) {
   else return str;
 };
 
-},{}],82:[function(require,module,exports){
+},{}],83:[function(require,module,exports){
 var deprecate = require('util-deprecate');
 
 module.exports = deprecate(require('sprintf-js').vsprintf,
   'vsprintf() will be removed in the next major release, use the sprintf-js package instead.');
 
-},{"sprintf-js":12,"util-deprecate":86}],83:[function(require,module,exports){
+},{"sprintf-js":13,"util-deprecate":87}],84:[function(require,module,exports){
 var isBlank = require('./isBlank');
 var trim = require('./trim');
 
@@ -30832,7 +30949,7 @@ module.exports = function words(str, delimiter) {
   return trim(str, delimiter).split(delimiter || /\s+/);
 };
 
-},{"./isBlank":41,"./trim":77}],84:[function(require,module,exports){
+},{"./isBlank":42,"./trim":78}],85:[function(require,module,exports){
 // Wrap
 // wraps a string by a certain width
 
@@ -30936,7 +31053,7 @@ module.exports = function wrap(str, options){
   }
 };
 
-},{"./helper/makeString":34}],85:[function(require,module,exports){
+},{"./helper/makeString":35}],86:[function(require,module,exports){
 //     Underscore.js 1.8.3
 //     http://underscorejs.org
 //     (c) 2009-2015 Jeremy Ashkenas, DocumentCloud and Investigative Reporters & Editors
@@ -32486,7 +32603,7 @@ module.exports = function wrap(str, options){
   }
 }.call(this));
 
-},{}],86:[function(require,module,exports){
+},{}],87:[function(require,module,exports){
 (function (global){
 
 /**

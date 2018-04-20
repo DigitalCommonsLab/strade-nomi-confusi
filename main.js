@@ -8,14 +8,25 @@ var $ = require('jquery'),
 	Search = require('leaflet-search'),
 	dissolve = require('geojson-dissolve');
 	//Panel = require('leaflet-panel-layers');
+	levenshtein = require('levenshtein'),
+	levenshteinDamerau = require('damerau-levenshtein');
+	_.mixin({str: s});
 
-var levenshtein = require('damerau-levenshtein');
 
-const MIN_LEV_SIMILARITY = 0.85;
+const MIN_LEV_SIMILARITY = 0.80;
+const DAMERAU = true;			//use Damerau algorithm
 
-_.mixin({str: s});
 
-window._ = _;
+function getLevenstein(str1, str2) {
+	if(DAMERAU)	{
+		var lev = levenshteinDamerau(str1, str2);
+		return lev.similarity;
+	}else {
+		var lev = new levenshtein(str1, str2);
+		return lev.distance;
+	}
+}
+
 /*
 String.prototype.levenshtein = function(string) {
 	var a = this, b = string + "", m = [], i, j, min = Math.min;
@@ -79,15 +90,7 @@ function getUncommon(text, common) {
     return uncommonArr.join(' ');
 }
 
-function cleanName(text) {
-	var ret = ""+_.str(text).trim().toLowerCase();
-	
-	ret.diff(blacklist);
-
-	return ret;
-};
-
-function randomColor() {
+function randomColor(str) {
 	var letters = '0123456789ABCDEF';
 	var color = '#';
 	for (var i = 0; i < 6; i++) {
@@ -119,7 +122,7 @@ $.getJSON('data/highway.json', function(json) {
 
 	//TODO normalize properties name:it short_name to only name
 	
-console.log('geojson',json);
+//console.log('geojson',json);
 
 	var fgroups = _.groupBy(json.features, function(f) {
 		return f.properties.name;
@@ -146,14 +149,14 @@ console.log('geojson',json);
 		return f1
 	});
 
-console.log('dissolve: ',json);
+//console.log('dissolve: ',json);
 
 	var geo = L.geoJSON(json, {
 			style: function(f) {
 				return {
 					weight: 6,
 					opacity: 0.8,
-					color: randomColor()
+					color: randomColor(f.properties.cleanName)
 				};
 			},
 			onEachFeature: function (f, layer) {
@@ -168,29 +171,30 @@ console.log('dissolve: ',json);
 					e.target.bringToFront();
 					e.target.openTooltip();
 
-					e.target.defStyle = f.style;
+					//e.target.defStyle = _.clone(e.target.style);
 					e.target.setStyle({
 						weight: 10,
 						opacity: 1,
 					});
 				}).on('mouseout', function(e) {
 
-					e.target.setStyle({
+					//e.target.setStyle(e.target.defStyle)
+					geo.resetStyle(e.target)
+					/*e.target.setStyle({
 						weight: 6,
 						opacity:0.8
-					});
+					});*/
 
 				}).on('click', function(e) {
 
-					L.DomEvent.stopPropagation(e)
+					L.DomEvent.stopPropagation(e);
 
-					var ranks = [];
+					var selectName = e.target.feature.properties.cleanName,
+						ranks = [];
 
 					geo.eachLayer(function(l) {
 						
-						//var lev = e.target.feature.properties.cleanName.levenstein( l.feature.properties.cleanName );
-						var lev = levenshtein(e.target.feature.properties.cleanName, l.feature.properties.cleanName);
-						lev = lev.similarity;
+						var lev = getLevenstein(selectName, l.feature.properties.cleanName)
 						//steps: 0,
 				        //relative: 0,
 				        //similarity: 1
@@ -198,10 +202,10 @@ console.log('dissolve: ',json);
 							ranks.push({
 								lev: lev,
 								name: l.feature.properties.name,
+								cleanName: l.feature.properties.cleanName,
 								layer: l,
 							});
 						}
-						console.log('"'+e.target.feature.properties.cleanName+'"','==', '"'+l.feature.properties.cleanName+'"', ' ==> ['+lev.toFixed(2)+']');
 
 						l.setStyle({
 							opacity: 0.2
@@ -214,6 +218,8 @@ console.log('dissolve: ',json);
 					ranks = _.first(ranks, 10);
 
 					var bb = ranks[0].layer.getBounds();
+					
+					console.clear();
 
 					for(let r in ranks) {
 						
@@ -226,6 +232,8 @@ console.log('dissolve: ',json);
 						.bindTooltip(ranks[r].name+'<br />simile al <b>'+lev+'%</b>',{permanent:true});
 						
 						bb.extend( ranks[r].layer.getBounds() );
+
+						console.log('"'+selectName+'"','==', '"'+ranks[r].cleanName+'"', ' ==> '+ranks[r].lev.toFixed(2));
 					}
 
 					if(ranks.length>1) {
@@ -244,8 +252,8 @@ console.log('dissolve: ',json);
 		});
 	//TODO fitBounds(json.bbox)
 	geo.addTo(map);
-	//
-	//
+	
+	
 	L.control.search({
 		layer: geo,
 		propertyName: 'name',
@@ -264,6 +272,7 @@ console.log('dissolve: ',json);
 	}).on('search:locationfound', function(e) {
 		e.layer.openTooltip();
 	}).addTo(map);
+
 
 	map.on('click', function(e) {
 		geo.eachLayer(function(l) {
