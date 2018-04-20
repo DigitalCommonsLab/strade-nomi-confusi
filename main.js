@@ -179,11 +179,11 @@ $.getJSON('data/highway.json', function(json) {
 				}).on('mouseout', function(e) {
 
 					//e.target.setStyle(e.target.defStyle)
-					geo.resetStyle(e.target)
-					/*e.target.setStyle({
+					//geo.resetStyle(e.target)
+					e.target.setStyle({
 						weight: 6,
 						opacity:0.8
-					});*/
+					});
 
 				}).on('click', function(e) {
 
